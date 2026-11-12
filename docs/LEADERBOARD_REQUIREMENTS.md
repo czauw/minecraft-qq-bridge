@@ -1,7 +1,7 @@
 # 排行榜需求文档（死亡榜 / 在线时长榜）
 
 > 状态：**需求已定，未实现**。本文只定义行为与口径，实现细节由后续任务卡决定。
-> 决策日期 2026-11-12；数据口径基于当时本机 4 个 MCSManager 实例的真实 `world/stats`。
+> 决策日期 2026-11-12（第二版：命令只匹配服务器、无参输出全量、保留结构化接口供后续图片渲染）。
 
 ## 1. 目标
 
@@ -14,12 +14,16 @@
 
 **粒度是（服务器 × 玩家）二元组**：同一玩家在不同服务器是不同条目，绝不合并成一个人；同一服务器内按玩家名聚合（见 §4）。
 
+**默认输出是「全量」**：不带参数时，输出所有已配置且启用的服务器上的**全部玩家**，不是只给 Top N。
+
 ## 2. 非目标（本期明确不做）
 
 - 不统计、不显示**死因**（`stats` 只有次数，死因需要事件流且无法回填历史）
-- 不做跨服总榜（只做「每服一份」的榜和单人跨服查询）
+- **不支持按玩家名查询**（参数只匹配服务器名；玩家名当参数一律视为「未找到服务器」）
+- 不做跨服总榜（同一玩家在不同服务器分开列）
 - 不做游戏内展示（不进 MC 记分板 / 不进 tab 列表）
 - 不做定时推送 / 周榜月榜 / 成就榜
+- 不输出图片（第一版只出文本；图片属后续版本，见 §8 / §14）
 - 不写任何 MC 侧数据（只读 `stats` 与 `usercache.json`）
 
 ## 3. 已确认的决策
@@ -29,6 +33,9 @@
 | 1 | **按玩家名合并** | 同一 `(服务器, 名字)` 下多个 UUID 的数值求和，榜上只出现一行 |
 | 2 | **不写死因** | 只显示次数 |
 | 3 | **时长精确到秒** | 显示格式 `20h35m07s`，由 tick ÷ 20 得出（1 tick = 0.05 s） |
+| 4 | **参数只匹配服务器** | 不做玩家名查询，避免与服务器名歧义 |
+| 5 | **无参 = 全量** | 输出所有启用服务器的全部玩家，不设 Top N、不默认截断 |
+| 6 | **接口与数据要保留** | 命令名、表结构、结构化接口（§8）稳定；后续加图片渲染只换渲染层 |
 
 ## 4. 身份与聚合规则
 
@@ -58,10 +65,10 @@
 `stats` 不实时更新，所以在线玩家 = `stats` 累计值 + 本次会话已过时间：
 
 ```
-显示时长 = play_time // 20 + (now - session_started_at)
+显示秒数 = play_time // 20 + (now - session_started_at)
 ```
 
-会话来源：QueQiao 的 `player_join` / `player_quit` 事件；`bridge` 重启后从 RCON `list` 对账补开。
+会话来源：QueQiao 的 `player_join` / `player_quit` 事件；桥接器重启后从 RCON `list` 对账补开。
 
 ### 5.3 崩溃与断线
 
@@ -71,29 +78,25 @@
 
 ## 6. 命令接口
 
-三个形态，解析顺序固定：
-
 | 输入 | 行为 |
 |---|---|
-| `/death` | 每个启用服务器一段，各 Top 5 |
-| `/death <服务器名>` | 该服 Top 10 |
-| `/death <玩家名>` | 该玩家在各服的死亡数，逐服一行，末尾一行合计 |
-| `/playtime` | 每个启用服务器一段，各 Top 5 |
-| `/playtime <服务器名> [N]` | 该服 Top N（N ∈ 1..20，默认 10） |
-| `/playtime <玩家名>` | 该玩家在各服的时长，逐服一行，末尾合计 |
+| `/death` | 所有已配置且启用的服务器，每服输出**该服全部玩家**的死亡次数 |
+| `/death <服务器名>` | 只输出该服的全部玩家 |
+| `/playtime` | 所有已配置且启用的服务器，每服输出**该服全部玩家**的在线时长 |
+| `/playtime <服务器名>` | 只输出该服的全部玩家 |
 
 解析规则：
 
-1. 先按**服务器名精确匹配**（区分大小写，与 `/list` 一致）；命中即按服务器处理
-2. 否则按**玩家名匹配**（不区分大小写；同名多 uuid 已合并）
-3. 都不命中 → `未找到服务器或玩家：<参数>`
-4. 参数解析失败（N 超范围）→ 回到默认值，不报错
+1. 命令本身大小写不敏感（`/Death` 也算）；参数不做模糊匹配
+2. 参数按**服务器名精确匹配**（区分大小写，与 `/list` 一致）
+3. 参数不是任何已配置服务器的名字 → `未找到服务器：<参数>`（**不会**再当成玩家名去找）
+4. 参数命中 `enabled: false` 的服务器 → 同样回 `未找到服务器：<参数>`（禁用项对外不可见，与 `/list` 一致）
+5. 多余参数（如 `/death 齿轮盛宴 5`）→ 忽略多余部分，仍按该服输出全量，不报错
 
 其它约束沿用现有行为：
 
-- 大小写不敏感的前缀匹配只对命令本身（`/death`、`/playtime`）
-- **以 `/` 开头的消息一律不转发 MC**（既有规则）
-- 全量模式下 `<@member_openid>` 前缀先剥离再匹配（既有规则）
+- **以 `/` 开头的消息一律不转发 MC**
+- 全量模式下 `<@member_openid>` 前缀先剥离再匹配
 - 命令来自群内任意成员即可，不做权限分级
 
 ## 7. 输出格式（严格）
@@ -109,89 +112,167 @@
 
 在线玩家追加标记：`20h35m07s（在线中）`。
 
+排序：数值降序；数值相同按玩家名 Unicode 升序（保证输出确定）。**包含 0 值玩家**（满足「全部玩家」的要求）。
+
 ```
 /death
-齿轮盛宴 死亡榜 Top5：
+齿轮盛宴 死亡榜：
 1. MUEZORE  82 次
 2. yui_Thefish  50 次
 3. Longsz  19 次
+4. RoyalSSS  3 次
 
-亡者世界 死亡榜 Top5：
+亡者世界 死亡榜：
 1. MUEZORE  115 次
 2. Saltedfish_SHELL  7 次
+3. lazyhape  5 次
 ```
 
 ```
-/playtime 齿轮盛宴 3
-齿轮盛宴 在线时长 Top3：
+/playtime
+齿轮盛宴 在线时长榜：
 1. Longsz  20h35m07s
 2. MUEZORE  19h09m12s（在线中）
 3. yui_Thefish  16h59m40s
+4. RoyalSSS  04m03s
+
+亡者世界 在线时长榜：
+1. MUEZORE  01h27m11s
+2. Saltedfish_SHELL  57m30s
+3. lazyhape  33m05s
 ```
 
-```
-/death MUEZORE
-MUEZORE 的死亡数：
-齿轮盛宴  82 次
-亡者世界  115 次
-合计  197 次
-```
-
-- 服务器之间空行分隔，顺序与 `config.yaml` 的 `servers` 一致
+- 每个服务器一段，段首 `<服务器名> <榜名>：`，段间空行分隔，顺序与 `config.yaml` 的 `servers` 一致
 - 某服无任何玩家数据：`<服务器名> 暂无数据`
-- 某服禁用（`enabled: false`）：**整段不出现**（与 `/list` 一致）
-- 单条回复受 `max_message_chars`（默认 1500）与 `max_reply_parts`（5 片）约束；4 服 × Top5 约 400–600 字，不会分片
-- 并列同名次：数值相同按玩家名 Unicode 升序，保证输出确定
+- 某服禁用（`enabled: false`）：**整段不出现**
+- 全部服都无数据：`排行榜暂无数据`
+- 长度控制：单条消息受 `max_message_chars`（默认 1500）限制，超出按**服务器边界**切分为多条，最多 `max_reply_parts`（5 片）；切分不得切断单个玩家行；仍放不下时最后一片末尾加 `（列表过长，已截断）`
 
-> 上面三段的玩家名与次数取自 2026-11-12 的真实 `stats` 快照；**秒数是格式演示**，不是真实值。
+> 示例中的玩家名与次数取自 2026-11-12 的真实 `stats` 快照（当时配置里启用的是「齿轮盛宴」「亡者世界」两台）；**秒数是格式演示**，不是真实值。
 
-## 8. 数据刷新与存储
+## 8. 结构化接口与数据（为后续图片渲染保留）
 
-- 存储：SQLite（单文件），路径 `/home/czauw/.local/share/mcqq-bridge/stats.db`
-- 表：`players(server, uuid, name, first_seen, last_seen)`、`player_stats(server, uuid, ticks, deaths, updated_at)`、`sessions(server, uuid, started_at)`
+第一版只出文本，但**数据与接口必须与渲染方式解耦**：后续加图片时只新增渲染器，不改命令、不改表、不改取数逻辑。
+
+### 8.1 内部数据结构
+
+两个榜共用同一结构（渲染层只需这一个输入）：
+
+```python
+@dataclass(frozen=True)
+class RankRow:
+    rank: int
+    player: str            # 展示名（已按 §4 合并）
+    value: int             # deaths: 次数；playtime: 秒
+    display: str           # 已格式化，如 "82 次" / "20h35m07s"
+    online: bool = False   # 仅 playtime 有意义
+
+@dataclass(frozen=True)
+class ServerBoard:
+    server: str
+    rows: list[RankRow]    # 全量，不截断
+    total_players: int
+
+@dataclass(frozen=True)
+class Leaderboard:
+    kind: Literal["deaths", "playtime"]
+    schema_version: int    # 从 1 开始，字段只增不改
+    generated_at: str      # RFC3339 UTC
+    servers: list[ServerBoard]   # 顺序 = config.yaml 顺序
+```
+
+- 文本渲染器与（将来的）图片渲染器都只消费 `Leaderboard`
+- 文本渲染器负责分片/截断；图片渲染器负责画图，不参与取数与格式化决策
+
+### 8.2 只读 JSON 接口（复用现有 loopback 状态端口）
+
+复用 `127.0.0.1:18080`，不新增端口：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/v1/leaderboards/deaths` | 全部启用服务器 + 全部玩家 |
+| GET | `/api/v1/leaderboards/playtime` | 同上，时长秒级 |
+| GET | `/api/v1/leaderboards/{kind}?server=<名字>` | 单服 |
+
+- 返回 §8.1 结构的 JSON，带 `schema_version: 1`
+- 与 `/api/v1/status` 一样不返回 openid、不返回密钥
+- 这是图片渲染器的取数入口：后续 `/death 图` 或定时出图都直接读它，不重复查库
+
+### 8.3 持久化（三张表固定）
+
+```sql
+CREATE TABLE players (
+  server TEXT, uuid TEXT, name TEXT,
+  first_seen TEXT, last_seen TEXT,
+  PRIMARY KEY (server, uuid)
+);
+CREATE TABLE player_stats (
+  server TEXT, uuid TEXT,
+  ticks INTEGER NOT NULL DEFAULT 0,
+  deaths INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (server, uuid)
+);
+CREATE TABLE sessions (
+  server TEXT, uuid TEXT, name TEXT,
+  started_at TEXT NOT NULL,
+  PRIMARY KEY (server, uuid)
+);
+```
+
+## 9. 数据刷新与存储
+
+- 存储：SQLite 单文件 `/home/czauw/.local/share/mcqq-bridge/stats.db`
 - 扫描：启动时全量导入一次；之后每 **60 秒**扫 `world/stats/*.json`，仅当 mtime 变化才解析（避免反复读几千个文件）
-- 写入：单连接 + 串行队列（asyncio 里用 `to_thread` 包装），失败只记日志不影响转发链路
+- 写入：单连接 + 串行队列（`asyncio.to_thread` 包装）；写失败只记日志，不影响转发链路
 - 保留：只保留累计值，不存逐次明细（不写死因，无明细需求）
 
-## 9. 失败与降级（不得伪造数据）
+## 10. 失败与降级（不得伪造数据）
 
 | 情况 | 行为 |
 |---|---|
 | stats 文件解析失败（半写） | 跳过该文件，保留上一次的值；日志 WARNING 一次（含服务器名，不含玩家数据） |
-| 某服 `world/stats` 目录不存在 | 该服所有榜显示 `<服务器名> 暂无数据` |
+| 某服 `world/stats` 目录不存在 | 该服显示 `<服务器名> 暂无数据` |
 | 整个数据源不可用 | 榜单显示 `排行榜数据暂不可用`，不显示 0 |
 | 单台 RCON 失败 | 只影响该服的对账，不影响其它服榜单 |
 | 数据库损坏 | 启动时重建并重新全量导入（stats 是权威源，可重算） |
 
-## 10. 权限与运行环境
+## 11. 权限与运行环境
 
 - 服务以 `root` 运行（`CapabilityBoundingSet=CAP_DAC_READ_SEARCH`），因为 `/opt/mcsmanager` 是 `750 root:root`
 - 实例数据只读挂载：`ReadOnlyPaths=/opt/mcsmanager/daemon/data/InstanceData`
 - 唯一可写路径：`ReadWritePaths=/home/czauw/.local/share/mcqq-bridge`（SQLite 落点）
 - 除 `world/stats/*.json` 与 `usercache.json` 外不读任何实例文件；不向实例目录写入
 
-## 11. 验收标准
+## 12. 验收标准
 
-1. `/playtime <服>` 输出的秒数能被 `world/stats` 独立复算（离线玩家完全一致；在线玩家差值 ≤ 对账间隔）
-2. 秒级精度：`ticks // 20`，不允许显示成分钟粒度
-3. 同服同名双 UUID 只出现一行，数值为求和（用现有「齿轮盛宴 / MUEZORE」数据验证：82 次 / 19h09m 量级）
-4. 跨服同名不合并：`MUEZORE` 在两服各一行
-5. 重启桥接器后数字不丢、不清零
-6. 崩溃场景：会话残留由 60 秒对账收敛，时长误差 ≤ 60 秒
-7. 单服掉线/数据缺失不影响其它服；禁用服整段不出现
-8. `/list`、消息转发、`/` 前缀抑制、`<@...>` 剥离等既有行为回归全绿
-9. 榜单查询走被动回复（带 `msg_id`），不消耗主动消息 1000 条/天配额
+1. `/death` 无参数时输出**所有启用服务器 × 每服全部玩家**（含 0 值），不是 Top N
+2. `/playtime` 无参数时同上
+3. 参数只匹配服务器：`/death MUEZORE`（玩家名）必须回 `未找到服务器：MUEZORE`，不得当成玩家查询
+4. 禁用服务器整段不出现；`/death <禁用服名>` 回 `未找到服务器：<名字>`
+5. `/playtime <服>` 的秒数能被 `world/stats` 独立复算（离线完全一致；在线差值 ≤ 对账间隔）
+6. 秒级精度：`ticks // 20`，不允许分钟粒度
+7. 同服同名双 UUID 只出现一行且数值求和（用「齿轮盛宴 / MUEZORE」验证：82 次 / 19h09m 量级）
+8. 跨服同名不合并：`MUEZORE` 在两服各一行
+9. 重启桥接器后数字不丢、不清零
+10. 崩溃场景：会话残留由 60 秒对账收敛，时长误差 ≤ 60 秒
+11. 长名单正确切分：不切断玩家行；超 5 片时末尾标注截断
+12. `GET /api/v1/leaderboards/deaths` 与文本结果一致，含 `schema_version`
+13. `/list`、消息转发、`/` 前缀抑制、`<@...>` 剥离等既有行为回归全绿
+14. 榜单查询走被动回复（带 `msg_id`），不消耗主动消息 1000 条/天配额
 
-## 12. 风险与未验证
+## 13. 风险与未验证
 
 - **26.2（原版生电）未验证**：该实例目前没有 `world/stats` 目录，`play_time`/`deaths` 键名与 1.20.1 是否一致需实测
 - **世界重置归零**：换世界/删档会让累计时长跳变，属预期
 - **同名合并的副作用**：离线模式下任何人可用任何名字，统计边界以此为准
 - **stats 半写**：MC 整文件覆盖写入，读的瞬间可能拿到截断 JSON，已定义跳过策略
 - **多世界/多维度**：本期只统计 `world/stats`（默认维度世界），`world_nether` 等独立世界不计入
+- **全量输出的长度**：玩家很多的服（>100 人）会撞 5 片上限，本期接受截断
 
-## 13. 未来扩展（不在本期）
+## 14. 后续版本（不在本期）
 
+- **图片渲染**：消费 §8.1 的 `Leaderboard` / §8.2 的 JSON 出图发群（需要富媒体上传）
 - 死因榜 / 最近死亡（需要事件流，从部署起累计）
 - 周榜 / 月榜（需要按天快照）
 - 成就榜、在线峰值
