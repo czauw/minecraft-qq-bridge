@@ -21,6 +21,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from .config import DEFAULT_STATS_ROOT, path_within_root
+
 __all__ = [
     "PlayerRow",
     "SessionRow",
@@ -112,8 +114,16 @@ class StatsPatch:
 
 
 class StatsStore:
-    def __init__(self, path: str, *, logger: logging.Logger | None = None) -> None:
+    def __init__(
+        self,
+        path: str,
+        *,
+        root: str = DEFAULT_STATS_ROOT,
+        logger: logging.Logger | None = None,
+    ) -> None:
         self.path = path
+        # 允许写数据的根目录：打开前按真实路径复核一次，越界直接拒绝（不建目录）
+        self.root = root
         self._log = logger or logging.getLogger("mcqq_bridge.stats_store")
         self._conn: sqlite3.Connection | None = None
         self._queue: asyncio.Queue[tuple[asyncio.Future[Any], Callable[[sqlite3.Connection], Any]]] = asyncio.Queue(
@@ -156,6 +166,11 @@ class StatsStore:
 
     def _open_sync(self) -> None:
         directory = os.path.dirname(self.path) or "."
+        # 越界路径连父目录都不创建：真实路径必须落在 root 之内（需求 §11）
+        if not path_within_root(self.path, self.root):
+            raise StoreUnavailable(
+                f"统计数据库路径越界（必须位于 {self.root} 之内），未创建任何目录"
+            )
         try:
             os.makedirs(directory, exist_ok=True)
         except OSError as exc:

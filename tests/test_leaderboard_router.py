@@ -96,7 +96,7 @@ async def build(tmp_path, *, passive_allowed: bool = True):
             server_entry("亡者世界", 19001, stats_dir=str(stats_b)),
             server_entry("资源服", 19002, enabled=False, stats_dir=str(stats_a)),
         ],
-        stats={"db_path": str(tmp_path / "stats.db")},
+        stats={"root": str(tmp_path), "db_path": str(tmp_path / "stats.db")},
         bot={"proactive_enabled": passive_allowed},
     )
     clients = [FakeClient("齿轮盛宴", []), FakeClient("亡者世界", [])]

@@ -88,7 +88,7 @@ async def test_disabled_relay_join_still_tracks_session(tmp_path):
         await runtime.leaderboards.stop()
 
 
-async def test_rcon_failure_does_not_close_sessions_or_other_servers(tmp_path):
+async def test_rcon_failure_converges_failed_server_only(tmp_path):
     root_a, stats_a = make_instance(tmp_path, "a")
     root_b, stats_b = make_instance(tmp_path, "b")
     for root in (root_a, root_b):
@@ -109,14 +109,98 @@ async def test_rcon_failure_does_not_close_sessions_or_other_servers(tmp_path):
     try:
         await service.reconcile_once()
         assert len(service._sessions) == 2
+        assert service._server_state["齿轮盛宴"].last_verified_at == T0
 
         client_a.fail = True  # 单台 RCON 失败
         clock.advance(30)
         await service.reconcile_once()
-        # A 的会话保留（加时按 60 秒证据窗口封顶），B 的会话正常刷新
-        assert ("齿轮盛宴", UUID_MAIN) in service._sessions
+        # A 的会话在本轮内关闭（不是留着等恢复），增量按封顶折进累计值
+        assert ("齿轮盛宴", UUID_MAIN) not in service._sessions
+        # B 不受影响，证据时刻正常刷新
         assert ("亡者世界", UUID_MAIN) in service._sessions
         assert service._sessions[("亡者世界", UUID_MAIN)].evidence_at == clock.now
+        boards = {board.server: board for board in (await service.get_board("playtime")).servers}
+        assert boards["齿轮盛宴"].rows[0].value == 130
+        assert boards["齿轮盛宴"].rows[0].online is False
+        assert boards["亡者世界"].rows[0].value == 130
+    finally:
+        await service.stop()
+
+
+async def test_rcon_failure_caps_persisted_ticks_at_last_verified_plus_60(tmp_path):
+    """RCON 持续失败：下一轮对账内关闭会话，落盘 ticks 只算到「最后确证在线 + 60 秒」。"""
+    config, manager, client = prepare(tmp_path, players=["MUEZORE"])
+    clock = FakeClock(T0)
+    service = await start_service(config, manager=manager, clock=clock)
+    try:
+        await service.reconcile_once()  # 成功名单：会话+T0 作为最后确证时刻
+        assert service._server_state["主服"].last_verified_at == T0
+        assert (await service.get_board("playtime")).servers[0].rows[0].online is True
+
+        clock.advance(30)
+        client.fail = True  # 服务器崩溃 / RCON 挂掉
+        clock.advance(3600)  # 一小时后才有下一次对账机会
+        await service.reconcile_once()
+
+        assert service._sessions == {}
+        board = await service.get_board("playtime")
+        # 权威 100 秒 + 封顶 60 秒 = 160（不是 3600 秒，也不是残留会话继续加时）
+        assert board.servers[0].rows[0].value == 160
+        assert board.servers[0].rows[0].online is False
+
+        # 落盘口径与展示完全一致：库里就是 3200 ticks（160 秒），不只是显示被截断
+        assert service._store is not None
+        _, stats, sessions = await service._store.load_all()
+        assert sessions == []
+        assert [(row.server, row.ticks) for row in stats] == [("主服", 3200)]
+    finally:
+        await service.stop()
+
+
+async def test_recovered_rcon_does_not_backfill_crashed_time(tmp_path):
+    """RCON 恢复后不得把崩溃期间的时间补加到玩家身上。"""
+    config, manager, client = prepare(tmp_path, players=["MUEZORE"])
+    clock = FakeClock(T0)
+    service = await start_service(config, manager=manager, clock=clock)
+    try:
+        await service.reconcile_once()
+        clock.advance(30)
+        client.fail = True
+        clock.advance(3600)
+        await service.reconcile_once()  # 失败轮：已收敛到 160 秒
+        assert (await service.get_board("playtime")).servers[0].rows[0].value == 160
+
+        # 服务器重启完成：RCON 恢复，但玩家已经不在线
+        client.fail = False
+        client.players = []
+        clock.advance(600)
+        await service.reconcile_once()
+        assert service._sessions == {}
+        assert (await service.get_board("playtime")).servers[0].rows[0].value == 160
+
+        # 再连续失败几轮也不会重新加时（没有会话可加，累计值不再变化）
+        client.fail = True
+        clock.advance(600)
+        await service.reconcile_once()
+        assert (await service.get_board("playtime")).servers[0].rows[0].value == 160
+    finally:
+        await service.stop()
+
+
+async def test_rcon_failure_logs_one_warning_with_server_and_reason(tmp_path, caplog):
+    config, manager, client = prepare(tmp_path, players=["MUEZORE"])
+    clock = FakeClock(T0)
+    service = await start_service(config, manager=manager, clock=clock)
+    try:
+        await service.reconcile_once()
+        client.fail = True
+        clock.advance(60)
+        with caplog.at_level("WARNING", logger="mcqq_bridge.leaderboards"):
+            await service.reconcile_once()
+        warnings = [record.getMessage() for record in caplog.records if "对账失败" in record.getMessage()]
+        assert len(warnings) == 1
+        assert "主服" in warnings[0]
+        assert "rcon_offline" in warnings[0]
     finally:
         await service.stop()
 
@@ -136,6 +220,8 @@ async def test_stalled_rcon_caps_online_extrapolation(tmp_path):
         # 权威 100 秒 + 最多一个对账周期（60 秒），不会无限外推
         assert board.servers[0].rows[0].value == 160
         assert MAX_ONLINE_EXTRAPOLATION_SECONDS == 60
+        # 封顶后会话立即关闭：库里不再有打开着的会话（不是只截断展示）
+        assert service._sessions == {}
     finally:
         await service.stop()
 
@@ -154,11 +240,15 @@ async def test_crash_sessions_converge_at_next_reconcile(tmp_path):
         await service.reconcile_once()
         assert service._sessions == {}
 
-        # 收敛后不再加时（估算秒不回写累计值）
+        # 封顶内的 45 秒已折进累计值（下一轮对账内收敛，误差 ≤ 60 秒）
         clock.advance(600)
         board = await service.get_board("playtime")
-        assert board.servers[0].rows[0].value == 100
+        assert board.servers[0].rows[0].value == 145
         assert board.servers[0].rows[0].online is False
+        assert service._store is not None
+        _, stats, sessions = await service._store.load_all()
+        assert sessions == []
+        assert [(row.server, row.ticks) for row in stats] == [("主服", 2900)]
     finally:
         await service.stop()
 

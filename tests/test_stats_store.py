@@ -22,7 +22,7 @@ from leaderboard_helpers import (
     write_usercache,
 )
 from mcqq_bridge.leaderboard_models import LeaderboardUnavailable
-from mcqq_bridge.stats_store import StatsStore
+from mcqq_bridge.stats_store import StatsStore, StoreUnavailable
 
 
 def read_schema(path: Path) -> dict[str, list[tuple]]:
@@ -42,7 +42,7 @@ def read_schema(path: Path) -> dict[str, list[tuple]]:
 
 async def test_exact_three_table_schema(tmp_path):
     db_path = tmp_path / "stats.db"
-    store = StatsStore(str(db_path))
+    store = StatsStore(str(db_path), root=str(tmp_path))
     await store.start()
     await store.stop()
 
@@ -57,7 +57,7 @@ async def test_exact_three_table_schema(tmp_path):
 
 
 async def test_to_thread_jobs_never_overlap_connection_access(tmp_path):
-    store = StatsStore(str(tmp_path / "stats.db"))
+    store = StatsStore(str(tmp_path / "stats.db"), root=str(tmp_path))
     await store.start()
     events: list[tuple[str, int]] = []
 
@@ -84,7 +84,7 @@ async def test_to_thread_jobs_never_overlap_connection_access(tmp_path):
 async def test_corrupt_database_is_quarantined_and_rebuilt(tmp_path):
     db_path = tmp_path / "stats.db"
     db_path.write_bytes(b"this is definitely not a sqlite database" * 10)
-    store = StatsStore(str(db_path))
+    store = StatsStore(str(db_path), root=str(tmp_path))
     await store.start()
     try:
         players, stats, sessions = await store.load_all()
@@ -95,6 +95,18 @@ async def test_corrupt_database_is_quarantined_and_rebuilt(tmp_path):
     assert any(path.name.startswith("stats.db.corrupt-") for path in tmp_path.iterdir())
     schema = read_schema(db_path)
     assert set(schema) == {"players", "player_stats", "sessions"}
+
+
+async def test_out_of_root_path_is_refused_without_creating_directories(tmp_path):
+    root = tmp_path / "allowed"
+    root.mkdir()
+    outside = tmp_path / "outside" / "deep"
+    store = StatsStore(str(outside / "stats.db"), root=str(root))
+    with pytest.raises(StoreUnavailable):
+        await store.start()
+    # 越界路径连父目录都不创建（需求 §11：唯一可写路径）
+    assert not outside.exists()
+    assert not (tmp_path / "outside").exists()
 
 
 async def test_unwritable_database_degrades_to_unavailable(tmp_path):
@@ -127,7 +139,7 @@ async def test_restart_preserves_authoritative_totals(tmp_path):
     await service.stop()
 
     # 直接读库确认累计值真的落盘（不是只存在内存里）
-    store = StatsStore(config.stats.db_path)
+    store = StatsStore(config.stats.db_path, root=config.stats.root)
     await store.start()
     try:
         _, stats, _ = await store.load_all()
@@ -197,7 +209,7 @@ async def test_store_survives_write_failure_and_keeps_serving(tmp_path, caplog):
 
 async def test_stop_waits_for_inflight_write_before_closing_connection(tmp_path):
     """在途写入的线程必须跑完才关连接，避免「to_thread 还在跑就 close」。"""
-    store = StatsStore(str(tmp_path / "stats.db"))
+    store = StatsStore(str(tmp_path / "stats.db"), root=str(tmp_path))
     await store.start()
     finished: list[int] = []
 

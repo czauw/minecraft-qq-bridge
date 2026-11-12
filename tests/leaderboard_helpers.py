@@ -91,7 +91,8 @@ def make_lb_config(
         servers=entries,
         bot=bot,
         relay=relay,
-        stats={"db_path": str(Path(tmp_path) / "stats.db")},
+        # 测试数据库落在 tmp_path：把允许根也设为 tmp_path（生产默认是 ReadWritePaths）
+        stats={"root": str(Path(tmp_path)), "db_path": str(Path(tmp_path) / "stats.db")},
     )
 
 

@@ -144,8 +144,11 @@ servers:
 #   * 输出全量（不设 Top N）；文本按服务器/玩家行边界分片，接口返回全量 JSON
 # -----------------------------------------------------------------------------
 stats:
-  # SQLite 单文件绝对路径；目录需已存在且可写（systemd 只放开
-  # /home/czauw/.local/share/mcqq-bridge 这一条 ReadWritePaths）
+  # 唯一允许写数据的根目录：默认值与 systemd 的 ReadWritePaths 完全一致；
+  # db_path 必须位于该目录之内（按解析后的真实路径校验，`..` 与指向外部的符号链接都会拒绝启动）
+  # 生产环境不要改大，否则等于绕过 systemd 的可写边界（systemd 不放开的话写库也会失败）
+  root: "/home/czauw/.local/share/mcqq-bridge"
+  # SQLite 单文件绝对路径；必须位于上面的 root 之内，目录需已存在且可写
   db_path: "/home/czauw/.local/share/mcqq-bridge/stats.db"
 
 # -----------------------------------------------------------------------------

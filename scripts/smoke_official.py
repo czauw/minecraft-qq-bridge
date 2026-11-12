@@ -309,7 +309,7 @@ async def main() -> int:
                 },
             ],
             "relay": {"dedupe_ttl_seconds": 60, "loop_guard_seconds": 2},
-            "stats": {"db_path": str(tmp_root / "stats.db")},
+            "stats": {"root": str(tmp_root), "db_path": str(tmp_root / "stats.db")},
             "runtime": {"status_http": {"enabled": False}},
             "logging": {"level": "WARNING"},
         }

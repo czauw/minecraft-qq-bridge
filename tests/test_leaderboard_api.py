@@ -54,7 +54,7 @@ async def build(tmp_path, players: int = 3):
             server_entry("亡者世界", 19001, stats_dir=str(stats_b)),
             server_entry("资源服", 19002, enabled=False, stats_dir=str(stats_a)),
         ],
-        stats={"db_path": str(tmp_path / "stats.db")},
+        stats={"root": str(tmp_path), "db_path": str(tmp_path / "stats.db")},
     )
     manager = FakeManager([FakeClient("齿轮盛宴", []), FakeClient("亡者世界", [])])
     service = await start_service(config, manager=manager, clock=FakeClock(T0))
@@ -177,7 +177,7 @@ async def test_api_is_not_truncated(tmp_path):
     write_usercache(root, entries)
     config = make_config(
         servers=[server_entry("大服", 19010, stats_dir=str(stats_dir))],
-        stats={"db_path": str(tmp_path / "stats.db")},
+        stats={"root": str(tmp_path), "db_path": str(tmp_path / "stats.db")},
     )
     service = await start_service(config, manager=FakeManager([FakeClient("大服", [])]), clock=FakeClock(T0))
     runtime = BridgeRuntime(config)
@@ -198,7 +198,7 @@ async def test_api_empty_board_is_200_with_empty_rows(tmp_path):
     _, stats_dir = make_instance(tmp_path, "empty")
     config = make_config(
         servers=[server_entry("空服", 19011, stats_dir=str(stats_dir))],
-        stats={"db_path": str(tmp_path / "stats.db")},
+        stats={"root": str(tmp_path), "db_path": str(tmp_path / "stats.db")},
     )
     service = await start_service(config, manager=FakeManager([FakeClient("空服", [])]), clock=FakeClock(T0))
     runtime = BridgeRuntime(config)

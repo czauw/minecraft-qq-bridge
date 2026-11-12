@@ -7,8 +7,10 @@
 * **在线加时** = ``ticks // 20 + floor(now - 会话 anchor)``；扫描到该 UUID 的
   ticks 变化时把 anchor 推进到该文件的 mtime，避免「文件已含本次会话」再被
   加一次（防双计）；ticks 下降（换世界）按新值重置基线。
-* **60 秒 RCON ``list`` 对账**收敛崩溃/断线残留会话；对账失败绝不批量清空，
-  在线加时最多外推到「最后一次确证在线 + 60 秒」。
+* **60 秒 RCON ``list`` 对账**收敛崩溃/断线残留会话；对账失败绝不批量清空在线记录，
+  而是以「最后确证在线 + 一个对账周期」封顶**把会话关掉并把封顶内的增量折进
+  ``player_stats.ticks``**——展示与落盘同一口径，RCON 恢复后不会再补加这段时间。
+  对账误差上限即一个对账周期（60 秒），另加最后一次 ``stats`` 落盘前的增量（不可控）。
 * 统计层失败只降级自己：不使桥接器退出、不影响 /list 与消息转发。
 
 本模块不做文本渲染（见 :mod:`leaderboard_text`），也不做 HTTP/QQ 收发。
@@ -78,6 +80,8 @@ class _SessionState:
 class _ServerState:
     status: str = "empty"  # ok | empty | missing | unavailable
     has_history: bool = False
+    # 最近一次成功拿到 RCON list 的时刻（epoch 秒）；对账失败时用它算封顶
+    last_verified_at: float | None = None
 
 
 class LeaderboardService:
@@ -136,7 +140,11 @@ class LeaderboardService:
             self._started = True
             return
         if self._store is None:
-            self._store = StatsStore(self.config.stats.db_path, logger=self._log)
+            self._store = StatsStore(
+                self.config.stats.db_path,
+                root=self.config.stats.root,
+                logger=self._log,
+            )
         try:
             await self._store.start()
             players, stats, sessions = await self._store.load_all()
@@ -291,8 +299,7 @@ class LeaderboardService:
                 session = self._sessions.get(key)
                 if session is not None:
                     online_names.add(name)
-                    horizon = min(now, session.evidence_at + MAX_ONLINE_EXTRAPOLATION_SECONDS)
-                    value += max(0, int(horizon - session.started_at))
+                    value += max(0, int(self._session_horizon(session, state, now) - session.started_at))
             totals[name] = totals.get(name, 0) + value
 
         ordered = sorted(totals.items(), key=lambda item: (-item[1], item[0]))
@@ -309,6 +316,17 @@ class LeaderboardService:
                 RankRow(rank=index, player=name, value=value, display=display, online=online)
             )
         return ServerBoard(server=server, rows=rows, total_players=len(rows))
+
+    def _session_horizon(self, session: _SessionState, state: _ServerState, now: float) -> float:
+        """在线加时的统一封顶口径（展示与落盘共用）。
+
+        「最后确证在线」= max(会话证据时刻, 该服最近一次成功 RCON 名单时刻)；
+        封顶 = 它 + 一个对账周期，且不超过当前时刻。
+        """
+        evidence = session.evidence_at
+        if state.last_verified_at is not None:
+            evidence = max(evidence, state.last_verified_at)
+        return min(now, evidence + MAX_ONLINE_EXTRAPOLATION_SECONDS)
 
     # -- 扫描 --------------------------------------------------------------
 
@@ -487,16 +505,52 @@ class LeaderboardService:
         # 退出后 MC 会落盘 stats：安排一次该服增量扫描，让权威值接上
         self._schedule(self._scan_server(server))
 
-    async def _close_server_sessions(self, server: str, now: float) -> None:
+    async def _close_server_sessions(self, server: str, now: float, *, reason: str = "连接断开") -> int:
+        """关闭该服所有在线会话，并把封顶内的估算增量折进 ``player_stats.ticks``。
+
+        封顶口径与展示完全一致（:meth:`_session_horizon`）：最多算到
+        「最后确证在线 + 一个对账周期」。落盘失败时一轮不动，下一轮重试；
+        会话保持打开，展示端仍按同一封顶截断，不会多算。
+        """
+        state = self._server_state.setdefault(server, _ServerState())
         async with self._lock:
             keys = [key for key in self._sessions if key[0] == server]
             if not keys:
-                return
-            if not await self._persist(StatsPatch(close_sessions=keys)):
-                return
+                return 0
+            patch = StatsPatch()
+            folded: list[tuple[tuple[str, str], int | None]] = []
             for key in keys:
+                session = self._sessions[key]
+                cap = self._session_horizon(session, state, now)
+                extra_seconds = max(0, int(cap - session.started_at))
+                stat = self._stats.get(key)
+                ticks = (stat.ticks if stat else 0) + extra_seconds * 20
+                patch.close_sessions.append(key)
+                folded.append((key, ticks if extra_seconds else None))
+                if extra_seconds:
+                    patch.stats.append(
+                        StatsRow(
+                            server,
+                            key[1],
+                            ticks,
+                            stat.deaths if stat else 0,
+                            utc_now_text(cap),
+                        )
+                    )
+            if not await self._persist(patch):
+                return 0
+            for key, ticks in folded:
                 self._sessions.pop(key, None)
-        self._log.info("排行榜已关闭 %s 的 %d 个在线会话（连接断开/对账）", server, len(keys))
+                if ticks is None:
+                    continue
+                stat = self._stats.get(key)
+                if stat is None:
+                    self._stats[key] = _StatState(ticks, 0, utc_now_text(now))
+                else:
+                    stat.ticks = ticks
+                    stat.updated_at = utc_now_text(now)
+        self._log.info("排行榜已关闭 %s 的 %d 个在线会话（%s）", server, len(keys), reason)
+        return len(keys)
 
     # -- 对账 --------------------------------------------------------------
 
@@ -519,7 +573,13 @@ class LeaderboardService:
             self._wake.clear()
 
     async def reconcile_once(self) -> None:
-        """一轮 RCON ``list`` 对账：补齐漏开的会话、关闭残留会话。"""
+        """一轮 RCON ``list`` 对账：补齐漏开的会话、关闭残留会话。
+
+        * 成功拿到名单 → 记录该服 ``last_verified_at``（本轮封顶基准）。
+        * 查询失败/抛异常 → **不跳过**：以 ``last_verified_at + 一个对账周期`` 封顶
+          关闭该服所有会话，并把封顶内的增量折进 ``player_stats.ticks``
+          （展示与落盘同一口径，恢复名单后不会补加这段时间）。
+        """
         if not self._started or not self._store_ready:
             return
         now = self._clock()
@@ -529,15 +589,26 @@ class LeaderboardService:
             if server.name not in self._scanners:
                 continue
             if not self._is_connected(server.name):
-                await self._close_server_sessions(server.name, now)
+                await self._close_server_sessions(server.name, now, reason="连接断开")
                 continue
             # 查询前先冻结「本代次已存在的会话」：查询期间新开的会话不能被旧快照删掉
             before = {key for key in self._sessions if key[0] == server.name}
-            names = await self._online_names(server.name)
+            names, reason = await self._online_names(server.name)
             if names is None:
-                # 单服 RCON 失败只影响本服对账，不关闭会话、不影响其它服
-                self._log.warning("排行榜对账查询失败（%s），本轮跳过", server.name)
+                closed = await self._close_server_sessions(
+                    server.name, self._clock(), reason=f"对账失败（{reason}）"
+                )
+                self._log.warning(
+                    "排行榜对账失败（%s，原因=%s），已按「最后确证在线 + %d 秒」封顶关闭 %d 个会话",
+                    server.name,
+                    reason,
+                    RECONCILE_INTERVAL_SECONDS,
+                    closed,
+                )
                 continue
+            # 成功拿到 list 的时刻：失败的下一轮用它做封顶基准
+            state = self._server_state.setdefault(server.name, _ServerState())
+            state.last_verified_at = self._clock()
             cache = self._scanners[server.name].usercache()
             online: dict[str, str] = {}
             online_names: list[str] = [str(item) for item in names]
@@ -592,26 +663,28 @@ class LeaderboardService:
 
     # -- 内部工具 ----------------------------------------------------------
 
-    async def _online_names(self, server: str) -> list[str] | None:
-        """取权威在线名单；查询失败返回 ``None``（绝不当作「空名单」）。"""
+    async def _online_names(self, server: str) -> tuple[list[str] | None, str]:
+        """取权威在线名单；失败返回 ``(None, 原因类型)``（绝不当作「空名单」）。"""
         query = getattr(self.manager, "query_rcon", None)
         try:
             if query is not None:
                 results = await query([server])
                 for result in results:
-                    if result.name == server and result.status == "online":
-                        return [str(item) for item in result.players]
-                return None
+                    if result.name != server:
+                        continue
+                    if result.status == "online":
+                        return [str(item) for item in result.players], "ok"
+                    return None, f"rcon_{result.status}"
+                return None, "rcon_no_result"
             client = self._client(server)
             if client is None:
-                return None
+                return None, "no_client"
             snapshot = await client.query_players(rcon_only=True)
-            return [str(item) for item in list(snapshot.players)]
+            return [str(item) for item in list(snapshot.players)], "ok"
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            self._log.warning("排行榜对账查询异常（%s）：%s", server, error_kind(exc))
-            return None
+            return None, error_kind(exc)
 
     def _client(self, server: str) -> Any:
         getter = getattr(self.manager, "client", None)

@@ -18,12 +18,14 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 __all__ = [
     "AppConfig",
     "BotConfig",
     "ConfigError",
+    "DEFAULT_STATS_DB_PATH",
+    "DEFAULT_STATS_ROOT",
     "LoggingConfig",
     "PlayerQueryConfig",
     "RelayConfig",
@@ -32,7 +34,29 @@ __all__ = [
     "StatsConfig",
     "StatusHttpConfig",
     "load_config",
+    "path_within_root",
 ]
+
+#: 唯一允许写数据的根目录：必须与 systemd 的 ``ReadWritePaths`` 完全一致（需求 §11）
+DEFAULT_STATS_ROOT = "/home/czauw/.local/share/mcqq-bridge"
+DEFAULT_STATS_DB_PATH = f"{DEFAULT_STATS_ROOT}/stats.db"
+
+
+def path_within_root(path: str, root: str) -> bool:
+    """``path`` 按**解析后的真实路径**是否位于 ``root`` 之内。
+
+    两边都做 ``os.path.realpath``（不要求路径存在）：``..`` 会被折叠，符号链接会被
+    展开到最终目标，所以 ``<root>/../../etc/x.db`` 与指向外部的软链接都判为越界。
+    ``root`` 为 ``/`` 时一律判为越界——那等于放开整盘写权限。
+    """
+    resolved_root = os.path.realpath(root)
+    if resolved_root in (os.sep, ""):
+        return False
+    try:
+        return os.path.commonpath([os.path.realpath(path), resolved_root]) == resolved_root
+    except ValueError:  # 相对/绝对混用等边界
+        return False
+
 
 _ENV_REF = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
 _HOST_ALLOWED = re.compile(r"^[A-Za-z0-9._:\-\[\]]+$")
@@ -288,20 +312,36 @@ class StatusHttpConfig(_Model):
 class StatsConfig(_Model):
     """排行榜持久化（SQLite）；只放数据库参数，数据源路径在 ``servers[].stats_dir``。"""
 
-    # SQLite 单文件；必须落在 systemd 的 ReadWritePaths=/home/czauw/.local/share/mcqq-bridge 内
-    db_path: str = "/home/czauw/.local/share/mcqq-bridge/stats.db"
+    # 允许写数据的唯一根目录；默认值与 systemd 的 ReadWritePaths 完全一致。
+    # 生产环境不要改：改大等于放宽可写边界（systemd 不放开的话写库会失败）。
+    root: str = DEFAULT_STATS_ROOT
+    # SQLite 单文件；必须位于上面的 root 之内（按解析后的真实路径校验）
+    db_path: str = DEFAULT_STATS_DB_PATH
 
-    @field_validator("db_path")
+    @field_validator("root", "db_path")
     @classmethod
-    def _db_path(cls, value: str) -> str:
+    def _absolute_path(cls, value: str, info: ValidationInfo) -> str:
+        field = f"stats.{info.field_name}"
         text = value.strip()
         if not text:
-            raise ValueError("stats.db_path 不能为空")
+            raise ValueError(f"{field} 不能为空")
         if "\n" in text or "\r" in text or "\x00" in text:
-            raise ValueError("stats.db_path 不能包含换行或 NUL")
+            raise ValueError(f"{field} 不能包含换行或 NUL")
         if not text.startswith("/"):
-            raise ValueError("stats.db_path 必须是绝对路径")
+            raise ValueError(f"{field} 必须是绝对路径")
         return text
+
+    @model_validator(mode="after")
+    def _db_path_confined(self) -> "StatsConfig":
+        """``db_path`` 必须落在 ``root`` 内；``..`` 与符号链接按真实路径判定越界。"""
+        if os.path.realpath(self.root) in (os.sep, ""):
+            raise ValueError("stats.root 不能是根目录 /（那等于允许写整盘）")
+        if not path_within_root(self.db_path, self.root):
+            raise ValueError(
+                f"stats.db_path 越界：必须位于 stats.root（{self.root}）之内，"
+                f"当前解析为 {os.path.realpath(self.db_path)}"
+            )
+        return self
 
 
 class RuntimeConfig(_Model):

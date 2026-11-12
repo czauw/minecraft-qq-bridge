@@ -187,7 +187,10 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 排行榜（§7.5）需要两处配置，缺一不可：
 
 1. `servers[].stats_dir` 指向该实例的 `<实例根>/world/stats`（`ls` 能看到一串 `<uuid>.json`）；
-2. `stats.db_path` 所在目录必须**先存在且可写**——它是 systemd 唯一放开的可写路径：
+2. `stats.db_path` 所在目录必须**先存在且可写**，且必须位于 `stats.root`
+（默认 `/home/czauw/.local/share/mcqq-bridge`，与 systemd 唯一放开的 `ReadWritePaths` 一致）之内——
+配置按**解析后的真实路径**校验，`..` 穿越或指向外部的符号链接会让 `--check-config`/启动直接报
+`stats.db_path` 错误（越界路径连父目录都不会被创建）：
 
 ```bash
 sudo mkdir -p /home/czauw/.local/share/mcqq-bridge     # 已存在时无副作用
@@ -276,12 +279,13 @@ RestartSec=10
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| `db_path` | `/home/czauw/.local/share/mcqq-bridge/stats.db` | SQLite 单文件绝对路径；目录需已存在且可写（systemd 只放开这一条 `ReadWritePaths`） |
+| `root` | `/home/czauw/.local/share/mcqq-bridge` | 唯一允许写数据的根目录，必须与 systemd 的 `ReadWritePaths` 一致；生产环境不要改 |
+| `db_path` | `/home/czauw/.local/share/mcqq-bridge/stats.db` | SQLite 单文件绝对路径，**必须位于 `root` 之内**（按解析后的真实路径校验：`..` 穿越与指向外部的符号链接都会被拒绝，启动即报 `stats.db_path` 字段错误）；目录需已存在且可写 |
 
 固定行为（**不提供开关，避免把验收口径改掉**）：
 
 * 启动时全量导入一次，之后每 **60 秒**增量扫描 `world/stats/*.json`；`mtime/size/inode` 未变则不读文件；
-* 每 **60 秒**用 RCON `list` 对账在线会话（补齐漏开的会话、关闭崩溃残留）；
+* 每 **60 秒**用 RCON `list` 对账在线会话（补齐漏开的会话、关闭崩溃残留）；对账失败时按「最后确证在线 + 60 秒」封顶关闭并落盘，不会留着会话等恢复；
 * 输出**全量**玩家（不设 Top N），单条消息过长按服务器/玩家行边界分片。
 
 ### `relay` / `runtime` / `logging`
@@ -419,10 +423,11 @@ QueQiao v0.5.0 / core 0.6.8 只实现 `broadcast`、`send_title`、`send_actionb
   推进到该文件 `mtime`，避免「文件已包含本次会话」再被加一次（防双计）；`ticks` 变小（换世界/回档）
   按新值重置基线，绝不取旧值与新值的最大值。
 * 会话来自 `player_join`/`player_quit`，并每 60 秒用 RCON `list` 对账：崩溃/强杀留下的残留会话在下一轮
-  对账停止加时；对账失败时在线加时最多外推到「最后一次确证在线 + 60 秒」，恢复名单后自动收敛。
-* 由此得到的口径边界（**不是本轮 bug**）：时长误差 ≈ 一个对账周期 + 最后一次 `stats` 落盘前的增量，
-  所以**不能无条件保证**任何故障下总误差都 ≤ 60 秒；桥接器停机期间尚未落盘的增量无法恢复。
-  崩溃/断线只会让「在线加时」停止，已落盘的累计值不受影响。
+  对账关闭；**对账查询失败不会跳过**——以「该服最后一次成功拿到 `list` 的时刻 + 60 秒」为封顶关闭会话，
+  封顶内的增量同时落盘到 `player_stats`（展示与库同一口径），RCON 恢复后不会再补加这段时间。
+* 由此得到的口径（**稳定承诺**）：**会话对账误差 ≤ 60 秒**；总时长另含最后一次 `stats` 落盘前的增量
+  （落盘时机由 MC 决定，不可控）。封顶内写回的是估算增量，下一次权威扫描读到更小的文件值时按文件值重置
+  （误差同样 ≤ 60 秒）。桥接器自身停机期间未落盘的增量无法恢复，已落盘的累计值不受影响。
 * 世界被删除/替换会让该世界累计值归零，属预期语义；只统计默认 `world/stats`，`world_nether` 等不计入。
 * 单文件半写/坏 JSON → 跳过该文件、保留上次有效值并只记一次日志（不含玩家名/UUID/路径）；
   目录不存在 → 该服「暂无数据」；权限/IO 失败 → 该服保留上次有效值；数据库损坏 → 启动时隔离重建并重新全量导入。
@@ -513,7 +518,7 @@ RCON `list` 与 `broadcast` ACK 均有记录；但下面 5 项里的双向回显
 6. 配好 `stats_dir` 后 `/playtime <服>` 的秒数与手工 `ticks // 20` 一致（离线玩家应完全一致）；
 7. 已知的同名双 UUID 玩家（如某服 `MUEZORE`）在榜上只占一行、数值为两个 UUID 之和；
 8. 玩家在线时数值随时间增长，退出落盘后数值与 `stats` 文件一致（不双计）；
-9. `kill -9` 服务器进程 → 该玩家最迟一个对账周期（60 秒）后停止加时；
+9. `kill -9` 服务器进程 → 该玩家最迟一个对账周期（60 秒）后停止加时，封顶内（≤ 最后确证在线 + 60 秒）的时长已落盘，RCON 恢复后不再补加；
 10. `GET /api/v1/leaderboards/deaths` 与 `/death` 文本逐行一致。
 
 ## 12. FAQ
@@ -540,8 +545,8 @@ A：前者是 `proactive_enabled: false`；后者是平台拒绝（权限/配额
 A：服务端把广播回显成玩家聊天。桥接器有 5 秒回环抑制（`relay.loop_guard_seconds`），延迟更大时调大该值。
 
 **Q：`/death`、`/playtime` 回「排行榜数据暂不可用」？**
-A：三种原因：① `stats.db_path` 所在目录不存在或不可写（systemd 只放开
-`/home/czauw/.local/share/mcqq-bridge`）；② 所有已配置的 `stats_dir` 都权限/IO 失败且从未成功导入过
+A：三种原因：① `stats.db_path` 越界（不在 `stats.root` 内，配置校验直接拒绝）或所在目录不存在/不可写
+（systemd 只放开 `/home/czauw/.local/share/mcqq-bridge`）；② 所有已配置的 `stats_dir` 都权限/IO 失败且从未成功导入过
 （看日志里的「排行榜数据源不可用（<服务器名>）」，不含玩家数据）；③ 进程刚启动、数据库仍在初始化。
 单台失败不影响其它服，其它服照常显示。
 

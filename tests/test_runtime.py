@@ -204,7 +204,7 @@ async def test_stats_failure_does_not_change_existing_health_endpoints(tmp_path)
     write_stats(stats_dir, "6f1b0c2e-1111-3a2b-9c4d-000000000001", ticks=20, deaths=1)
     config = make_config(
         servers=[server_entry("主服", 18080, stats_dir=str(stats_dir))],
-        stats={"db_path": str(blocker / "stats.db")},
+        stats={"root": str(tmp_path), "db_path": str(blocker / "stats.db")},
     )
     runtime = BridgeRuntime(config)
     started = {"qq": 0, "manager": 0}
@@ -234,7 +234,7 @@ async def test_leaderboard_start_stop_drains_worker_once(tmp_path):
     write_stats(stats_dir, "6f1b0c2e-1111-3a2b-9c4d-000000000001", ticks=20, deaths=1)
     config = make_config(
         servers=[server_entry("主服", 18080, stats_dir=str(stats_dir))],
-        stats={"db_path": str(tmp_path / "stats.db")},
+        stats={"root": str(tmp_path), "db_path": str(tmp_path / "stats.db")},
     )
     runtime = BridgeRuntime(config)
 
