@@ -1,0 +1,176 @@
+# =============================================================================
+#  mcqq-bridge 配置文件（完整中文注释模板）
+#  用法：cp config.example.yaml config.yaml 后按注释填写
+#  校验：python -m mcqq_bridge --config config.yaml --check-config
+#  启动：python -m mcqq_bridge --config config.yaml
+#
+#  安全约定：
+#  1. 本文件可以放占位值；真实密钥建议用 ${环境变量名} 引用，不要直接写明文。
+#  2. group_openid 是「群 OpenID」，不是 QQ 群号；获取方式见 README。
+#  3. 所有字段名大小写敏感；写错字段会被直接拒绝（不会静默忽略）。
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# QQ 官方机器人（仅官方接口：OpenAPI + 官方 WebSocket 网关）
+# -----------------------------------------------------------------------------
+bot:
+  # 机器人 AppID（QQ 开放平台 → 开发 → 开发设置），纯数字字符串
+  app_id: ""
+  # 机器人 ClientSecret；建议写成 ${QQ_BOT_CLIENT_SECRET}
+  client_secret: "${QQ_BOT_CLIENT_SECRET}"
+  # 目标群的 group_openid（不是群号，获取方式见 README「获取 group_openid」）
+  group_openid: ""
+  # 官方 OpenAPI 根地址；官方文档为 https://api.bot.qq.com（不含结尾斜杠）
+  # 如果你的应用仍使用旧域名，可改为 https://api.sgroup.qq.com
+  api_base: "https://api.bot.qq.com"
+  # 网关地址；留空表示调用 GET /gateway 动态获取（推荐）
+  gateway_url: ""
+  # 订阅事件位图：1<<25 = 33554432（群与 C2C 事件 GROUP_AND_C2C_EVENT）
+  intents: 33554432
+  # 接收模式：all=群全量消息（GROUP_MESSAGE_CREATE，需要机器人在群里开启「接收所有消息」）
+  #           mention=仅 @机器人 的消息（GROUP_AT_MESSAGE_CREATE，权限更容易满足）
+  receive_mode: "all"
+  # 是否允许主动消息（MC 事件推送）。官方主动消息有频控和权限要求；
+  # 关闭后只回复 QQ 消息，MC 事件只写日志。
+  proactive_enabled: true
+  # 本地发送限速（条/分钟，作用于本进程全部主动+被动发送），官方另有平台频控
+  send_rate_per_minute: 20
+  # 单次 HTTP 请求超时（秒）
+  request_timeout_seconds: 10
+  # access_token 提前刷新窗口（秒）。官方 token 默认 7200 秒有效
+  token_refresh_skew_seconds: 60
+  # 网关重连最大退避（秒），指数退避上限
+  reconnect_max_seconds: 60
+  # 单条 QQ 文本上限（字符）。过长内容会按行切分
+  max_message_chars: 1500
+  # 被动回复最多分片数（官方：同一条消息 5 分钟内最多回复 5 次，故上限 5）
+  max_reply_parts: 5
+  # 心跳 ACK 等待上限（秒），超时会主动重连
+  heartbeat_ack_timeout_seconds: 90
+  # ---- 事件队列（有界）----
+  # 队列容量：收到的群事件先入队，队列满时不再接收并主动 Resume（未处理事件由网关重投）。
+  # 「恢复水位」只会推进到连续处理完成的事件，因此不会丢消息。
+  event_queue_size: 64
+  # 并发处理事件数（1 表示严格按序处理；调大可提高吞吐，代价是轻微乱序风险）
+  event_workers: 4
+  # ---- 群内状态（bot_state）探测 ----
+  # 官方接口 GET /v2/groups/{group_openid}/bot_state，返回 allow_proactive_msg / recv_msg_setting。
+  # 该接口目前仅白名单机器人可用，返回 11253 时按 unknown 降级（status/readyz 会显示 degraded），
+  # 不会谎称「已确认可主动推送」。
+  bot_state_probe_enabled: true
+  bot_state_interval_seconds: 300  # 周期探测间隔（秒）；0 = 只启动时探测一次
+  # ---- 主动消息被拒后的有界冷却 ----
+  # 平台因权限/配额拒绝主动消息时，指数退避暂停主动发送，避免每条 MC 事件都去打被拒接口；
+  # 冷却结束后自动恢复一次尝试，成功即清零。
+  proactive_cooldown_initial_seconds: 30
+  proactive_cooldown_max_seconds: 600
+
+# -----------------------------------------------------------------------------
+# QueQiao 服务器列表（每个服务器一条独立 WebSocket 连接）
+# 规则：
+#   * name 唯一；host+port 组合全局唯一（禁用项也参与唯一性校验，避免误解封）
+#   * 相同 host 不同 port、不同 host 相同 port 都合法
+#   * enabled=false 的服务器只保留配置：不连接、不监听、不广播、不查询，/list 里完全不出现
+# -----------------------------------------------------------------------------
+servers:
+  # ---- 第 1 台：主服 ----
+  - name: "主服"                  # /list 与 MC 事件里显示的名称，建议短且唯一
+    host: "127.0.0.1"             # QueQiao websocket_server.host，只能写主机名/IP（不要带 http:// 或路径）
+    port: 8080                    # QueQiao websocket_server.port
+    enabled: true                 # 是否启用
+    path: "/"                     # WebSocket 路径，默认 "/"；必须与 QueQiao 保持一致
+    tls: false                    # QueQiao 未启用 TLS 时为 false
+    access_token: ""              # 对应 QueQiao config.yml 的 access_token；可写 ${QUEQIAO_MAIN_TOKEN}
+    self_name: ""                 # 握手头 x-self-name；留空则使用上面的 name，必须与 QueQiao server_name 一致
+    players:
+      # 玩家名单查询策略：
+      #   auto  = 先 rcon 后 status（推荐；QueQiao 已发布版本没有完整名单 API）
+      #   rcon  = 通过 QueQiao 官方接口 send_rcon_command 执行 list（权威、实时、需要 QueQiao 开启 rcon）
+      #   status= 仅用 get_status 的 Server List Ping 采样；只有样例条数==在线人数时才接受，否则视为查询失败
+      mode: "auto"
+      rcon_command: "list"        # 由 QueQiao 在其服务端执行的命令（官方文档示例即 list）
+      timeout_seconds: 8          # 单次查询超时（秒），超时只影响这一台
+    connect_timeout_seconds: 10   # 建连超时（秒）
+    reconnect_initial_seconds: 1  # 重连初始退避（秒）
+    reconnect_max_seconds: 60     # 重连最大退避（秒）
+
+  # ---- 第 2 台：同 host 不同 port（合法）----
+  - name: "生存服"
+    host: "127.0.0.1"
+    port: 8081
+    enabled: true
+    path: "/"
+    tls: false
+    access_token: ""
+    self_name: ""
+    players:
+      mode: "auto"
+      rcon_command: "list"
+      timeout_seconds: 8
+    connect_timeout_seconds: 10
+    reconnect_initial_seconds: 1
+    reconnect_max_seconds: 60
+
+  # ---- 第 3 台：不同 host 相同 port（合法），当前禁用 ----
+  - name: "创造服"
+    host: "192.168.10.30"
+    port: 8080
+    enabled: false                # 禁用：不建连接、不查询，/list 里完全不出现该服务器
+    path: "/"
+    tls: false
+    access_token: ""
+    self_name: ""
+    players:
+      mode: "auto"
+      rcon_command: "list"
+      timeout_seconds: 8
+    connect_timeout_seconds: 10
+    reconnect_initial_seconds: 1
+    reconnect_max_seconds: 60
+
+# -----------------------------------------------------------------------------
+# 互通行为
+# -----------------------------------------------------------------------------
+relay:
+  # 是否把 QQ 群普通消息广播到 MC（关闭后仍可用 /list）
+  qq_to_mc_enabled: true
+  # MC → QQ 的四类事件开关
+  mc_to_qq:
+    chat: true                    # 玩家聊天
+    death: true                   # 玩家死亡（部分服务端不支持，见 README）
+    join: true                    # 玩家进入
+    leave: true                   # 玩家离开
+  # /list 命令前缀（大小写不敏感；/listing 不会被当作命令）
+  list_command: "/list"
+  # 事件去重窗口（秒）与最大条目数（有界，不会无限占内存）
+  dedupe_ttl_seconds: 120
+  dedupe_max_entries: 4096
+  # QQ→MC 广播的回环抑制窗口（秒）：同名文本在该窗口内从 MC 回来会被丢弃
+  loop_guard_seconds: 5
+  # QQ 事件没有昵称时使用的兜底名（官方 author.username 通常有值；群名片不保证）
+  nickname_fallback: "QQ群友"
+  # 附件占位符（不下载任何图片/文件）
+  image_placeholder: "[图片]"
+  attachment_placeholder: "[附件]"
+  # 昵称/服务器名最大显示长度
+  max_nickname_chars: 32
+  # 单条 MC → QQ 内容最大长度
+  max_mc_message_chars: 2000
+
+# -----------------------------------------------------------------------------
+# 运行时
+# -----------------------------------------------------------------------------
+runtime:
+  # 只读状态 HTTP（/healthz、/readyz、/api/v1/status），不暴露密钥和消息正文
+  status_http:
+    enabled: true
+    host: "127.0.0.1"             # 只监听本机；需要远程查看时自行改 0.0.0.0 并加防火墙
+    port: 18080                   # 不要用 8080：那是 QueQiao 的常见默认端口
+  shutdown_timeout_seconds: 10    # 优雅关闭等待上限（秒）
+
+# -----------------------------------------------------------------------------
+# 日志
+# -----------------------------------------------------------------------------
+logging:
+  level: "INFO"                   # DEBUG / INFO / WARNING / ERROR
+  file: ""                        # 留空输出到 stdout；可写 "logs/mcqq-bridge.log"

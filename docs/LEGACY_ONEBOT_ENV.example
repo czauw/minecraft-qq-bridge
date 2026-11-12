@@ -1,0 +1,47 @@
+# 历史归档：旧 OneBot v11 MVP 的 .env 模板（2026-11-11 移出 .env.example）。
+# 仅用于旧模块 mcqq_bridge.main 的回归测试；新版本请使用 config.yaml + .env.example。
+APP_NAME=minecraft-qq-bridge
+LOG_LEVEL=INFO
+HOST=0.0.0.0
+PORT=8000
+
+# MC webhook
+MC_WEBHOOK_TOKEN=replace-with-a-long-random-token
+MC_WEBHOOK_REQUIRE_TOKEN=true
+STATE_TTL_SECONDS=120
+MC_NOTIFICATIONS='{"chat":true,"death":true,"join":true,"leave":true}'
+
+# OneBot v11 adapter；核心不内置 QQ 登录实现
+ALLOWED_GROUP_IDS=123456789
+ONEBOT_ENABLED=false
+ONEBOT_TRANSPORT=http
+ONEBOT_API_URL=http://onebot:3000
+ONEBOT_ACCESS_TOKEN=replace-with-onebot-token
+ONEBOT_WEBHOOK_TOKEN=replace-with-onebot-webhook-token
+ONEBOT_WEBHOOK_SECRET=
+ONEBOT_SELF_ID=
+ONEBOT_WS_PATH=/api/v1/onebot/ws
+ONEBOT_API_TIMEOUT_SECONDS=5
+
+# QQ -> MC 回调
+QQ_TO_MC_ENABLED=true
+MC_CALLBACK_URL=http://minecraft-bridge-consumer:25580/bridge/qq
+MC_CALLBACK_TOKEN=replace-with-callback-token
+MC_COMMANDS=players,status
+MC_SAY_ENABLED=false
+
+# Hermes admin-only HTTP adapter；默认关闭。
+HERMES_ADMIN_ENABLED=false
+HERMES_ADMIN_IDS=
+HERMES_API_URL=http://127.0.0.1:8642/v1
+HERMES_API_TOKEN=replace-with-a-separate-api-server-key
+HERMES_MODEL=hermes-agent
+HERMES_TIMEOUT_SECONDS=30
+HERMES_MAX_CONCURRENCY=1
+HERMES_MAX_PROMPT_CHARS=2000
+HERMES_MAX_RESPONSE_CHARS=6000
+
+# Reserved only; enabling this does not connect any provider
+LLM_ENABLED=false
+LLM_PERSONA=
+LLM_RANDOM_REPLY_PROBABILITY=0.0

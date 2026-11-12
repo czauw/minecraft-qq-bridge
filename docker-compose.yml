@@ -1,0 +1,28 @@
+services:
+  bridge:
+    build: .
+    image: minecraft-qq-bridge:local
+    restart: unless-stopped
+    command: ["python", "-m", "mcqq_bridge", "--config", "/app/config.yaml"]
+    environment:
+      # 配置里用 ${QQ_BOT_CLIENT_SECRET} 引用时会读取该变量；从宿主机环境透传
+      QQ_BOT_CLIENT_SECRET: ${QQ_BOT_CLIENT_SECRET:-}
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+    # 使用 host 网络：QueQiao 通常监听在宿主机的 127.0.0.1，
+    # 容器内的 127.0.0.1 是容器自己，桥接器会连不上。使用 host 网络后，
+    # config.yaml 里的 127.0.0.1:8080 才指向宿主机的 QueQiao。
+    # 如果你把 QueQiao 也放进了同一 Docker 网络，可删除 network_mode 并改用服务名。
+    network_mode: host
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18080/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

@@ -1,0 +1,143 @@
+{
+  "version": 1,
+  "sources": [
+    {
+      "id": 1,
+      "url": "https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/event-emit/websocket.html",
+      "title": "",
+      "accessed": "2026-11-11"
+    },
+    {
+      "id": 2,
+      "url": "https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/group_message_create.html",
+      "title": "",
+      "accessed": "2026-11-11"
+    },
+    {
+      "id": 3,
+      "url": "https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_bot_state.get.html",
+      "title": "",
+      "accessed": "2026-11-11"
+    },
+    {
+      "id": 4,
+      "url": "https://github.com/17TheWord/QueQiao",
+      "title": "",
+      "accessed": "2026-11-11"
+    },
+    {
+      "id": 5,
+      "url": "https://api.github.com/repos/17TheWord/QueQiao/releases/latest",
+      "title": "",
+      "accessed": "2026-11-11"
+    },
+    {
+      "id": 6,
+      "url": "https://raw.githubusercontent.com/17TheWord/QueQiao/main/README.md",
+      "title": "",
+      "accessed": "2026-11-11"
+    },
+    {
+      "id": 7,
+      "url": "https://queqiao-docs.pages.dev/api/v2",
+      "title": "",
+      "accessed": "2026-11-11"
+    },
+    {
+      "id": 8,
+      "url": "https://queqiao-docs.pages.dev/api/v2/broadcast.html",
+      "title": "",
+      "accessed": "2026-11-11"
+    },
+    {
+      "id": 9,
+      "url": "https://queqiao-docs.pages.dev/events/v2",
+      "title": "",
+      "accessed": "2026-11-11"
+    },
+    {
+      "id": 10,
+      "url": "https://api.github.com/repos/17TheWord/QueQiao/git/trees/v0.5.0?recursive=1",
+      "title": "",
+      "accessed": "2026-11-11"
+    },
+    {
+      "id": 11,
+      "url": "https://queqiao-docs.pages.dev/config",
+      "title": "",
+      "accessed": "2026-11-11"
+    },
+    {
+      "id": 12,
+      "url": "https://queqiao-docs.pages.dev/events/v2/message/player-chat-event.html",
+      "title": "",
+      "accessed": "2026-11-11"
+    },
+    {
+      "id": 13,
+      "url": "https://queqiao-docs.pages.dev/events/v2/notice/player-death-event.html",
+      "title": "",
+      "accessed": "2026-11-11"
+    },
+    {
+      "id": 14,
+      "url": "https://queqiao-docs.pages.dev/events/v2/notice/player-join-event.html",
+      "title": "",
+      "accessed": "2026-11-11"
+    },
+    {
+      "id": 15,
+      "url": "https://queqiao-docs.pages.dev/events/v2/notice/player-quit-event.html",
+      "title": "",
+      "accessed": "2026-11-11"
+    },
+    {
+      "id": 16,
+      "url": "https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/access-token.html",
+      "title": "",
+      "accessed": "2026-11-11"
+    },
+    {
+      "id": 17,
+      "url": "https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_messages.post.html",
+      "title": "",
+      "accessed": "2026-11-11"
+    },
+    {
+      "id": 18,
+      "url": "https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/api-call-guide.html",
+      "title": "",
+      "accessed": "2026-11-11"
+    },
+    {
+      "id": 19,
+      "url": "https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/group_at_message_create.html",
+      "title": "",
+      "accessed": "2026-11-11"
+    },
+    {
+      "id": 20,
+      "url": "https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/event-emit/payload.html",
+      "title": "",
+      "accessed": "2026-11-11"
+    },
+    {
+      "id": 21,
+      "url": "https://queqiao-docs.pages.dev/events/v2/model/player.html",
+      "title": "",
+      "accessed": "2026-11-11"
+    },
+    {
+      "id": 22,
+      "url": "https://bot.q.qq.com/wiki/develop/api-v2/openapi/wss/url_get.html",
+      "title": "",
+      "accessed": "2026-11-11"
+    },
+    {
+      "id": 23,
+      "url": "https://bot.q.qq.com/wiki/develop/api-v2/openapi/wss/shard_url_get.html",
+      "title": "",
+      "accessed": "2026-11-11"
+    }
+  ]
+}

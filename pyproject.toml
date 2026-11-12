@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "minecraft-qq-bridge"
+version = "1.0.0"
+description = "QQ 官方机器人 × Minecraft QueQiao 多服务器互通桥接器"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi==0.162.2",
+  "httpx==0.28.1",
+  "pydantic-settings==2.16.2",
+  "uvicorn[standard]==0.54.0",
+  "PyYAML==6.0.3",
+  "websockets==13.1",
+]
+
+[project.scripts]
+mcqq-bridge = "mcqq_bridge.__main__:main"
+
+[project.optional-dependencies]
+test = [
+  "pytest==8.4.2",
+  "pytest-asyncio==1.4.1.post1",
+  "httpx2==2.16.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,2 @@
+# The pyproject is the single source of direct dependency versions.
+-e .[test]
