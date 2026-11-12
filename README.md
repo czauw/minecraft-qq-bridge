@@ -427,3 +427,14 @@ A：服务端把广播回显成玩家聊天。桥接器有 5 秒回环抑制（`
 * 没有自动 provider 回滚：切回 OneBot 必须改代码入口，且仍有第三方登录风险。
 * 旧文档原文已删除，可从基线 commit `ae93e5a` 取回：`git show ae93e5a:docs/LEGACY_ONEBOT_README.md`。
 * 三个阶段的历史与当时的测试结论：`docs/archive/HISTORY.md`。
+
+## 相关文档
+
+| 文档 | 内容 |
+|---|---|
+| `docs/MULTISERVER_REQUIREMENTS.md` | 多服务器互通的原始需求与验收口径 |
+| `docs/MCSMANAGER_DEPLOY.md` | 本机 4 个实例的 QueQiao 部署与实测记录 |
+| `docs/THREAT_MODEL.md` | 威胁模型与安全边界 |
+| `docs/VERIFICATION.md` | 协议级验证结论与「已验证 / 未验证」清单 |
+| `docs/LEADERBOARD_REQUIREMENTS.md` | 死亡榜 / 在线时长榜需求（**仅需求，未实现**） |
+| `docs/archive/HISTORY.md` | 旧路线历史摘要（原文可从基线 commit 取回） |
