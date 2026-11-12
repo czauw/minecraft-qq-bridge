@@ -6,6 +6,7 @@
 * QQ 群消息 → 广播到所有在线的 MC 服务器；
 * MC 的聊天 / 进入 / 离开 / 死亡 → 转发到 QQ 群；
 * `/list` 查询所有**启用**服务器的在线玩家；
+* `/death`、`/playtime` 查死亡榜与在线时长榜（数据来自各服 `world/stats`，秒级、全量）；
 * 每台服务器一条独立 WebSocket，单台断线不影响其它服务器，自动退避重连并重新同步名单。
 
 QQ 侧只用官方接口（OpenAPI + 官方 WebSocket 网关），不涉及 OneBot、NapCat 等非官方登录协议。
@@ -17,6 +18,7 @@ QQ 侧只用官方接口（OpenAPI + 官方 WebSocket 网关），不涉及 OneB
 | QQ 群消息 → MC（全量或仅 @） | ✅ | 文本「昵称：内容」 |
 | MC 聊天/进入/离开/死亡 → QQ | ✅ | 统一 `[服务器] [玩家] ： 内容` |
 | `/list` 全部 / 单个 / 不存在 | ✅ | 格式固定，见 §7 |
+| `/death`、`/playtime` 全量榜单 | ✅ 本地已验 | 数据来自各服 `world/stats`，秒级、按服×玩家全量输出，见 §7.5；真实实例目录尚未在本机联调（见 §11） |
 | 多服独立连接、禁用项、唯一性校验 | ✅ | `name` 唯一 + `host:port` 全局唯一（禁用项也校验） |
 | 断线重连 / 重连后重新同步名单 | ✅ | 指数退避；断线立即显示离线 |
 | 图片/附件 | ✅ 占位符 | `[图片]` / `[附件]`，**不下载任何文件** |
@@ -182,6 +184,18 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 > `Fatal Python error: Failed to import encodings module`，因为 `/home/czauw/.hermes` 是 `700`）。
 > 只保留 `CAP_DAC_READ_SEARCH` 即可：读文件够用，写只在 `ReadWritePaths` 内。
 
+排行榜（§7.5）需要两处配置，缺一不可：
+
+1. `servers[].stats_dir` 指向该实例的 `<实例根>/world/stats`（`ls` 能看到一串 `<uuid>.json`）；
+2. `stats.db_path` 所在目录必须**先存在且可写**——它是 systemd 唯一放开的可写路径：
+
+```bash
+sudo mkdir -p /home/czauw/.local/share/mcqq-bridge     # 已存在时无副作用
+sudo chown root:root /home/czauw/.local/share/mcqq-bridge && sudo chmod 750 /home/czauw/.local/share/mcqq-bridge
+```
+
+不配 `stats_dir` 时统计层完全不启动（不建库、不扫描），旧行为不变。
+
 ```bash
 sudo systemctl status mcqq-bridge.service
 sudo systemctl restart mcqq-bridge.service
@@ -248,6 +262,7 @@ RestartSec=10
 | `tls` | `false` | QueQiao 前面有 TLS 时改 `true`（`wss://`） |
 | `access_token` | 空 | 对应 QueQiao `access_token`；可写 `${QUEQIAO_XXX_TOKEN}` |
 | `self_name` | 空 | 握手 `x-self-name`；留空用 `name` |
+| `stats_dir` | 空 | 排行榜数据源：该实例的 `<实例根>/world/stats`（绝对路径、末级必须是 `stats`）。留空 = 该服不采集（榜单显示「<服务器名> 暂无数据」）；`usercache.json` 固定从 `stats_dir/../../usercache.json` 读取 |
 | `players.mode` | `auto` | `auto`=先 rcon 后 status，`rcon`=只用 `send_rcon_command`，`status`=只用 ping 采样 |
 | `players.rcon_command` | `list` | 由 QueQiao 执行的命令 |
 | `players.timeout_seconds` | `8` | 单台查询超时（只影响该台） |
@@ -256,6 +271,18 @@ RestartSec=10
 
 唯一性：`name` 唯一；规范化后的 `host:port` 全局唯一（相同 host 不同 port、不同 host 相同 port 都合法），
 禁用项也参与校验。IP 会标准化（`::1` 与 `0:0:0:0:0:0:0:1` 视为同一台），DNS 只做大小写/末尾点规范化，不做解析。
+
+### `stats`
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `db_path` | `/home/czauw/.local/share/mcqq-bridge/stats.db` | SQLite 单文件绝对路径；目录需已存在且可写（systemd 只放开这一条 `ReadWritePaths`） |
+
+固定行为（**不提供开关，避免把验收口径改掉**）：
+
+* 启动时全量导入一次，之后每 **60 秒**增量扫描 `world/stats/*.json`；`mtime/size/inode` 未变则不读文件；
+* 每 **60 秒**用 RCON `list` 对账在线会话（补齐漏开的会话、关闭崩溃残留）；
+* 输出**全量**玩家（不设 Top N），单条消息过长按服务器/玩家行边界分片。
 
 ### `relay` / `runtime` / `logging`
 
@@ -284,8 +311,9 @@ RestartSec=10
 | `<@A> <@B> /list 主服` | 执行 `/list 主服` |
 | `<@A> 大家好` | 转发 MC，文本为 `小明：大家好`（不含 `<@A>`） |
 
-**所有以 `/` 开头的聊天都不转发到 MC**，不管它是不是已实现的指令。已实现的只有列表指令（默认 `/list`）；
-`/help`、`/listing` 等未知斜杠内容会被丢弃，**不保证有 QQ 回复**。
+**所有以 `/` 开头的聊天都不转发到 MC**，不管它是不是已实现的指令。已实现的是列表指令（默认 `/list`）
+和两个榜单指令（`/death`、`/playtime`，见 §7.5）；`/help`、`/listing`、`/deathx` 等未知斜杠内容会被丢弃，
+**不保证有 QQ 回复**。
 
 ### 7.2 `/list`
 
@@ -320,6 +348,52 @@ RestartSec=10
 
 照抄一个 `servers` 条目改 `name`、`host`、`port` 即可；不想删配置就写 `enabled: false`，它不产生任何连接。
 
+### 7.5 `/death`、`/playtime`（死亡榜 / 在线时长榜）
+
+**参数只匹配服务器名，不查玩家**：`/death MUEZORE` 回 `未找到服务器：MUEZORE`。
+参数按 `servers[].name` **精确匹配（区分大小写，与 `/list` 一致）**，多余参数忽略；
+无参数时输出**所有启用服务器 × 每服全部玩家**（含 0 次/0 秒），不是 Top N。
+
+| 输入 | 输出 |
+|---|---|
+| `/death` | 每台启用服一段：`齿轮盛宴 死亡榜：` + `1. MUEZORE  82 次` … |
+| `/death 齿轮盛宴` | 只输出该服，全量 |
+| `/playtime` | 每段标题 `<服务器名> 在线时长榜：`，行如 `2. MUEZORE  19h05m27s（在线中）` |
+| `/death MUEZORE`（玩家名） | `未找到服务器：MUEZORE` |
+| `/death 创造服`（`enabled: false`） | `未找到服务器：创造服` |
+| 某服没有任何玩家数据 | `<服务器名> 暂无数据`（该段仍出现）；全部服都没数据 → `排行榜暂无数据` |
+| 数据源/数据库整体不可用 | `排行榜数据暂不可用`（不会显示 0 冒充数据） |
+
+严格格式（以 `齿轮盛宴`、`亡者世界` 两台为例）：
+
+```
+/death
+齿轮盛宴 死亡榜：
+1. MUEZORE  82 次
+2. yui_Thefish  0 次
+
+亡者世界 死亡榜：
+1. MUEZORE  115 次
+```
+
+```
+/playtime
+齿轮盛宴 在线时长榜：
+1. Longsz  20h35m07s
+2. MUEZORE  19h09m12s（在线中）
+3. RoyalSSS  04m03s
+```
+
+* 排序：数值降序，数值相同按玩家名 Unicode 升序（输出确定）；
+* 时长格式：`XhYYmZZs` / `YYmZZs` / `ZZs` / `0s`，**小时不补零**，秒级精度（`ticks // 20`，不是分钟粒度）；
+* 同服同名多 UUID（离线模式 v3 与正版 v4 并存）按名字**求和成一行**；**跨服不合并**；
+* 命令名大小写不敏感（`/Death` 也算），`/deathx`、`/playtimes` 不算命令；
+* 分片：受 `max_message_chars`（默认 1500）与 `max_reply_parts`（默认 5）限制，按服务器/玩家行边界切分，
+  **不切断单个玩家行**，续片重复该服标题；仍放不下时最后一片末尾加 `（列表过长，已截断）`；
+* 回复全部走**被动回复**（带 `msg_id`），不消耗主动消息配额；
+* 若有人把 `relay.list_command` 也配成 `/death` 或 `/playtime`，以 `list_command` 为准（既有自定义优先），
+  需要榜单命令时请换一个 `list_command`。
+
 ## 8. 玩家名单从哪里来
 
 QueQiao v0.5.0 / core 0.6.8 只实现 `broadcast`、`send_title`、`send_actionbar`、`send_private_msg`、
@@ -333,6 +407,26 @@ QueQiao v0.5.0 / core 0.6.8 只实现 `broadcast`、`send_title`、`send_actionb
    否则报查询失败并显示离线——所以 RCON 不可用不等于一定离线，但也不保证可用。`mode: status` 只用该采样。
 3. 断线立即清空名单；重连后自动重新同步；`join`/`leave` 只做增量修正，不替代权威查询。
    查询期间到达的 join/leave 按 UUID（无 UUID 按名字）重放合并，断线/重连后的旧结果直接作废。
+
+### 8.1 排行榜的数据来源（`/death`、`/playtime`）
+
+* 权威值只读 `servers[].stats_dir` 下的 `world/stats/<uuid>.json`：
+  `stats.minecraft:custom.minecraft:play_time`（tick，20 tick = 1 秒）与 `minecraft:deaths`；
+  玩家名取同目录上两级的 `usercache.json` 最新映射，找不到映射时显示 `UUID 前 8 位 + ?`。
+* **不写任何 MC 数据**：除 `world/stats/*.json` 与 `usercache.json` 外不读实例文件，也不向实例目录写入。
+* 存储粒度是 `(服务器, UUID)`，展示粒度是 `(服务器, 名字)`：同服同名多 UUID 求和成一行，跨服不合并。
+* 在线加时 = `stats 累计 tick // 20` + 本次会话已过秒数；扫描到该 UUID 的 `stats` 变化时把会话起点
+  推进到该文件 `mtime`，避免「文件已包含本次会话」再被加一次（防双计）；`ticks` 变小（换世界/回档）
+  按新值重置基线，绝不取旧值与新值的最大值。
+* 会话来自 `player_join`/`player_quit`，并每 60 秒用 RCON `list` 对账：崩溃/强杀留下的残留会话在下一轮
+  对账停止加时；对账失败时在线加时最多外推到「最后一次确证在线 + 60 秒」，恢复名单后自动收敛。
+* 由此得到的口径边界（**不是本轮 bug**）：时长误差 ≈ 一个对账周期 + 最后一次 `stats` 落盘前的增量，
+  所以**不能无条件保证**任何故障下总误差都 ≤ 60 秒；桥接器停机期间尚未落盘的增量无法恢复。
+  崩溃/断线只会让「在线加时」停止，已落盘的累计值不受影响。
+* 世界被删除/替换会让该世界累计值归零，属预期语义；只统计默认 `world/stats`，`world_nether` 等不计入。
+* 单文件半写/坏 JSON → 跳过该文件、保留上次有效值并只记一次日志（不含玩家名/UUID/路径）；
+  目录不存在 → 该服「暂无数据」；权限/IO 失败 → 该服保留上次有效值；数据库损坏 → 启动时隔离重建并重新全量导入。
+* **26.2（原版生电）尚未验证**：该实例目前没有 `world/stats` 目录，键名与 1.20.1 是否一致需实测。
 
 ## 9. 安全边界
 
@@ -357,12 +451,21 @@ QueQiao v0.5.0 / core 0.6.8 只实现 `broadcast`、`send_title`、`send_actionb
 | `/healthz` | 进程活着就返回 `{"status":"ok"}`，不反映依赖状态 |
 | `/readyz` | `ready` 需同时满足：QQ 网关已连、≥1 台**启用**服务器已连、无 QQ 降级原因；否则 `degraded`，附 `servers_enabled` / `servers_connected` / `qq_degraded` |
 | `/api/v1/status` | QQ 连接/队列/`bot_state` 与每台服务器的连接/人数/最近错误；**包含禁用项**，与 `/list` 的隐藏语义不同 |
+| `/api/v1/leaderboards/deaths` | 死亡榜，全部启用服务器 × 全部玩家（全量、不截断），带 `schema_version: 1` |
+| `/api/v1/leaderboards/playtime` | 在线时长榜，同上，`value` 单位是秒 |
+| `/api/v1/leaderboards/{deaths\|playtime}?server=<名字>` | 单服；未知/禁用服务器 404 `{"detail":"未找到服务器：<名字>"}`，数据源整体不可用 503 `{"detail":"排行榜数据暂不可用"}` |
 
 ```bash
 curl -fsS http://127.0.0.1:18080/healthz
 curl -fsS http://127.0.0.1:18080/readyz
 curl -fsS http://127.0.0.1:18080/api/v1/status
+curl -fsS http://127.0.0.1:18080/api/v1/leaderboards/deaths
+curl -fsS 'http://127.0.0.1:18080/api/v1/leaderboards/playtime?server=齿轮盛宴'
 ```
+
+榜单 JSON 与 `/death`、`/playtime` **同源**（同一个 DTO、同一个时钟），字段为
+`{kind, schema_version, generated_at, servers:[{server, total_players, rows:[{rank, player, value, display, online}]}]}`；
+不含 UUID、群 OpenID、实例路径或任何密钥。文本层的分片只发生在渲染阶段，接口始终返回全量。
 
 * HTTP 200 不等于健康：`/readyz` 也可能 200 且 `status=degraded`，要看字段。
 * `proactive_state_unknown` / `recv_msg_setting_unknown` 属事实暴露：`bot_state` 仅白名单机器人可用（11253），
@@ -381,8 +484,17 @@ curl -fsS http://127.0.0.1:18080/api/v1/status
 ```
 
 smoke 会真实建立 WebSocket、校验 `x-self-name` 握手头、走 `send_rcon_command`/`broadcast`/`get_status`
-的请求-响应（含 `echo` 关联），并验证 `/list` 文本、禁用服务器零连接、QQ→MC 广播、MC→QQ 转发。
+的请求-响应（含 `echo` 关联），验证 `/list` 文本、禁用服务器零连接、QQ→MC 广播、MC→QQ 转发；
+排行榜部分再用**临时目录里的真实 `world/stats/*.json` + `usercache.json`** 走完
+`stats → 统计服务 → 路由 → QQ HTTP` 全链路：无参全量（含 0 值）、禁用服不可见、
+`<@...>` 剥离、只匹配服务器名、多片分片（每片带同一 `msg_id` 且 `msg_seq` 递增）、
+`GET /api/v1/leaderboards/deaths` 与文本同源。
 **它不连接真实 QQ 与真实 Minecraft**；历史执行计数与逐项证据见 `docs/VERIFICATION.md`。
+
+排行榜相关的自动化覆盖（`tests/test_leaderboard_*.py`、`tests/test_stats_*`）：14 条验收口径逐条有用例，
+含秒级精度边界、同服同名双 UUID 求和、跨服不合并、重启不丢、崩溃会话 60 秒收敛、
+长名单不切断玩家行、JSON 与文本一致、被动回复 `msg_id`/`msg_seq`。
+
 本机部署另做过真实联调：真实 token、网关 `Identify`、`bot_state`、群发送 HTTP 200，四台真实 QueQiao 的
 RCON `list` 与 `broadcast` ACK 均有记录；但下面 5 项里的双向回显、非零名单与游戏内可见性仍未验证，
 真实边界见 `docs/VERIFICATION.md` §6。
@@ -394,6 +506,15 @@ RCON `list` 与 `broadcast` ACK 均有记录；但下面 5 项里的双向回显
 3. `/list` → 至少一台返回真实玩家名，人数与名单条数一致；
 4. 停掉一台 QueQiao → 该台显示离线，其它台照常收发；恢复后自动重连并重新同步；
 5. 群主关掉「主动推送消息」→ MC 事件发送失败被记录，不报成功。
+
+排行榜真实环境验收（本轮**未执行**：`/opt/mcsmanager` 是 `750 root:root`，当前开发会话无 root，
+真实 `world/stats` 未读取过；以下需在有 root 的部署机上做）：
+
+6. 配好 `stats_dir` 后 `/playtime <服>` 的秒数与手工 `ticks // 20` 一致（离线玩家应完全一致）；
+7. 已知的同名双 UUID 玩家（如某服 `MUEZORE`）在榜上只占一行、数值为两个 UUID 之和；
+8. 玩家在线时数值随时间增长，退出落盘后数值与 `stats` 文件一致（不双计）；
+9. `kill -9` 服务器进程 → 该玩家最迟一个对账周期（60 秒）后停止加时；
+10. `GET /api/v1/leaderboards/deaths` 与 `/death` 文本逐行一致。
 
 ## 12. FAQ
 
@@ -418,6 +539,23 @@ A：前者是 `proactive_enabled: false`；后者是平台拒绝（权限/配额
 **Q：广播后 MC 里又冒出一条同样内容并转发回群？**
 A：服务端把广播回显成玩家聊天。桥接器有 5 秒回环抑制（`relay.loop_guard_seconds`），延迟更大时调大该值。
 
+**Q：`/death`、`/playtime` 回「排行榜数据暂不可用」？**
+A：三种原因：① `stats.db_path` 所在目录不存在或不可写（systemd 只放开
+`/home/czauw/.local/share/mcqq-bridge`）；② 所有已配置的 `stats_dir` 都权限/IO 失败且从未成功导入过
+（看日志里的「排行榜数据源不可用（<服务器名>）」，不含玩家数据）；③ 进程刚启动、数据库仍在初始化。
+单台失败不影响其它服，其它服照常显示。
+
+**Q：某台服务器显示「<服务器名> 暂无数据」？**
+A：该服 `stats_dir` 留空、目录不存在或目录里还没有 `*.json`。`enabled: false` 的服则**整段不出现**，
+按名字查回「未找到服务器」。
+
+**Q：数字突然变小/归零？**
+A：`world/stats` 被删除或换了世界，累计值以新文件为准（属预期）。DB 只是缓存，`stats` 是唯一权威源。
+
+**Q：在线时长和游戏里 `/playtime` 差几十秒？**
+A：`stats` 只在玩家退出或世界保存时落盘，在线期间是「上次落盘值 + 本次会话已过秒数」的估算，
+再叠加 60 秒对账周期，误差属正常；玩家退出并落盘后即与 `stats` 完全一致。
+
 ## 附录：旧 OneBot 模块
 
 * 旧实现（OneBot v11 + HTTP/反向 WS）保留为 `src/mcqq_bridge/main.py`、`onebot.py`、`service.py` 等，
@@ -436,5 +574,5 @@ A：服务端把广播回显成玩家聊天。桥接器有 5 秒回环抑制（`
 | `docs/MCSMANAGER_DEPLOY.md` | 本机 4 个实例的 QueQiao 部署与实测记录 |
 | `docs/THREAT_MODEL.md` | 威胁模型与安全边界 |
 | `docs/VERIFICATION.md` | 协议级验证结论与「已验证 / 未验证」清单 |
-| `docs/LEADERBOARD_REQUIREMENTS.md` | 死亡榜 / 在线时长榜需求（**仅需求，未实现**） |
+| `docs/LEADERBOARD_REQUIREMENTS.md` | 死亡榜 / 在线时长榜需求（实现已按此文档完成，验收状态见 §11） |
 | `docs/archive/HISTORY.md` | 旧路线历史摘要（原文可从基线 commit 取回） |

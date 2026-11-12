@@ -11,10 +11,12 @@ import logging
 from typing import Any, Callable, cast
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 
 from .config import AppConfig, setup_logging
 from .events import MCEvent, QQMessage
+from .leaderboard_models import LeaderboardUnavailable, UnknownServerError
+from .leaderboards import LeaderboardService
 from .manager import ServerManager
 from .qq_official import QQBotClient
 from .router import BridgeRouter
@@ -34,9 +36,14 @@ class _QuietUvicornServer(uvicorn.Server):
 class BridgeRuntime:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
-        self.manager = ServerManager(config, self._on_mc_event)
+        # 统计服务先建（管理器要用它的连接状态回调），随后把 manager 注入回去
+        self.leaderboards = LeaderboardService(config)
+        self.manager = ServerManager(
+            config, self._on_mc_event, on_connection_change=self.leaderboards.on_connection_change
+        )
+        self.leaderboards.manager = self.manager
         self.qq = QQBotClient(config.bot, config.relay, self._on_qq_message)
-        self.router = BridgeRouter(config, self.manager, self.qq)
+        self.router = BridgeRouter(config, self.manager, self.qq, leaderboards=self.leaderboards)
         self._status_server: _QuietUvicornServer | None = None
         self._status_task: asyncio.Task[None] | None = None
         self._started = False
@@ -44,6 +51,8 @@ class BridgeRuntime:
     # -- adapter 回调 ------------------------------------------------------
 
     async def _on_mc_event(self, event: MCEvent) -> None:
+        # 统计钩子在 relay 开关之前：关闭「进/退服转发」也照常统计在线时长
+        self.leaderboards.offer_event(event)
         await self.router.on_mc_event(event)
 
     async def _on_qq_message(self, message: QQMessage) -> None:
@@ -71,6 +80,7 @@ class BridgeRuntime:
                 server.enabled,
                 server.players.mode,
             )
+        await self.leaderboards.start()
         await self.manager.start()
         await self.qq.start()
         self._start_status_server()
@@ -83,6 +93,7 @@ class BridgeRuntime:
         await self.qq.close()
         await self.manager.stop()
         await self._stop_status_server()
+        await self.leaderboards.stop()
         self._started = False
         logger.info("已停止")
 
@@ -165,5 +176,24 @@ def create_status_app(runtime: BridgeRuntime) -> FastAPI:
     @app.get("/api/v1/status")
     async def status() -> dict[str, Any]:
         return runtime.status_payload()
+
+    @app.get("/api/v1/leaderboards/{kind}")
+    async def leaderboards(kind: str, server: str | None = None) -> dict[str, Any]:
+        """只读榜单 JSON：DTO 与 /death、/playtime 文本同源（schema_version=1）。
+
+        全量、不截断（文本层的分片只属于渲染层）；不含 UUID / openid / 路径 / 密钥。
+        """
+        if kind not in ("deaths", "playtime"):
+            raise HTTPException(status_code=404, detail="未知榜单类型")
+        service = getattr(runtime, "leaderboards", None)
+        if service is None:
+            raise HTTPException(status_code=503, detail="排行榜数据暂不可用")
+        try:
+            board = await service.get_board(kind, server or None)
+        except UnknownServerError as exc:
+            raise HTTPException(status_code=404, detail=f"未找到服务器：{exc.name}") from exc
+        except LeaderboardUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        return board.to_dict()
 
     return app

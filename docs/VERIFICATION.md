@@ -9,13 +9,14 @@
 
 | 类别 | 状态 | 依据 |
 |---|---|---|
-| 单元测试 | ✅ | `pytest -q` → **235 passed**（2026-11-12 复跑） |
+| 单元测试 | ✅ | `pytest -q` → **344 passed**（2026-11-12，含排行榜新增 109 项） |
 | 协议级集成（真实本地 TCP WebSocket） | ✅ | `tests/test_integration_protocol.py`，3 启用 + 1 禁用 |
-| 端到端 smoke（模拟 QueQiao + 模拟 QQ 网关） | ✅ | `SMOKE PASS: 10/10`（2026-11-12 复跑） |
+| 端到端 smoke（模拟 QueQiao + 模拟 QQ 网关） | ✅ | `SMOKE PASS: 18/18`（2026-11-12，含排行榜全链路） |
 | 新入口启动 / 状态接口 / SIGTERM / 日志脱敏 | ✅ | 真实子进程探测（§4） |
 | 真实 QQ 平台（token / 网关 / Identify / `bot_state` / 群发送） | ⚠️ 已连通 | journal：`getAppAccessToken` 200、`GET /gateway` 200、`Identify`、`bot_state` 200、5 次 `POST /v2/groups/.../messages` 200 |
 | 真实群消息双向回显、非零名单、游戏内可见性 | ❌ 未验证 | 真实边界见 §6 第 1、2 条 |
 | Docker 构建 | ❌ 未执行 | 当前用户不在 docker 组 |
+| 排行榜真实实例 `world/stats` | ❌ 未验证 | `/opt/mcsmanager` 为 `750 root:root`，开发会话无 root；本地夹具与 smoke 已覆盖格式与链路（§3.1） |
 | 真实 Minecraft + QueQiao 全链路 | ⚠️ 仅局部 | 四实例插件启动/RCON/ACK 已实测（`docs/MCSMANAGER_DEPLOY.md`），无真实玩家与双向收发 |
 | 上游「完整玩家名单 API」 | ⚠️ 不存在 | 源码级核实见 §2 |
 
@@ -62,7 +63,9 @@
 
 ```console
 $ .venv/bin/python -B -m pytest -q -p no:cacheprovider
-235 passed in 3.90s          # 2026-11-12 复跑
+344 passed in 5.85s          # 2026-11-12，含排行榜新增 109 项
+$ .venv/bin/python -B scripts/smoke_official.py
+SMOKE PASS: 18/18 项通过      # 原 10 项 + 排行榜 8 项
 ```
 
 覆盖重点（回归名称见测试文件；源码注释引用的 M1–M9 是首轮审查编号，对应下列条目）：
@@ -81,6 +84,30 @@ $ .venv/bin/python -B -m pytest -q -p no:cacheprovider
 集成测试的真实性边界：QueQiao 侧是**真实 TCP WebSocket 服务端**（校验 `x-self-name`/`Authorization`、
 按 Protocol V2 应答 `api`/`echo`、推送事件），QQ 侧是**真实 TCP WebSocket 网关**（Hello/Identify/READY/心跳 ACK）
 加 `httpx.MockTransport`。**没有**连接真实 QQ 或真实 Minecraft。
+
+### 3.1 排行榜（`/death`、`/playtime`）
+
+自动化覆盖（`tests/test_leaderboard_*.py`、`tests/test_stats_*.py`，共 109 项）：
+
+* **命令口径**：无参输出所有启用服 × 每服全部玩家（含 0 值）、玩家名参数回「未找到服务器」、
+  禁用服整段不出现且按名查询回「未找到服务器」、`<@...>` 剥离、多余参数忽略、`/deathx` 不算命令；
+* **数值口径**：`ticks // 20` 秒级、同服同名双 UUID 求和且会话只计一次、跨服不合并、
+  在线加时与落盘后重基线不双计、`ticks` 下降按新值重置（换世界）、平局按名字 Unicode 升序；
+* **可靠性**：mtime/size/inode 未变不读文件、写失败不推进扫描缓存、半写 JSON 保留上次值且只 WARNING 一次、
+  usercache 改名生效、缺映射回退 `uuid[:8]?`、缺目录「暂无数据」与权限错误保留旧值区分、
+  数据库损坏隔离重建、重启不清零且不把停机时间算成在线、在途写在关闭连接前跑完；
+* **会话**：重复 join/leave 幂等、关闭进服转发仍统计、单台 RCON 失败不清空会话、
+  对账不覆盖并发 join、崩溃会话下一轮对账停止加时、对账持续失败时加时封顶 60 秒；
+* **渲染与接口**：整服优先分片、不切断玩家行、超 5 片标注截断、JSON 与文本同源、
+  `schema_version=1`、404/503 语义、无 UUID/路径/OpenID 泄漏。
+
+smoke 额外用**临时目录里的真实 `world/stats/*.json` + `usercache.json`**（不是 mock 数据对象）
+走完 `stats → 统计服务 → 路由 → QQ HTTP`：3 片回复共用同一 `msg_id`、`msg_seq` 1..3、
+分片不切行、禁用服 404、JSON 与文本一致。
+
+**仍未验证**：真实实例目录（`/opt/mcsmanager` 为 `750 root:root`，本会话无 root 权限）下的
+`world/stats` 键名/数值、真实在线玩家的加时与落盘一致性、`26.2` 实例无 `world/stats` 的降级表现。
+这些需要在有 root 的部署机上按 README §11 第 6–10 项执行。
 
 ## 4. 真实进程验证（2026-11-11）
 

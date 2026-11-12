@@ -14,6 +14,8 @@ from typing import Any, Callable, Iterable, cast
 
 from .config import AppConfig, RelayConfig
 from .events import MCEvent, QQMessage
+from .leaderboard_models import LeaderboardUnavailable, UnknownServerError
+from .leaderboard_text import render_leaderboard
 from .manager import ServerQueryResult
 
 __all__ = ["BridgeRouter", "format_list", "format_mc_event", "split_message"]
@@ -155,10 +157,12 @@ class BridgeRouter:
         qq: Any,
         *,
         logger: logging.Logger | None = None,
+        leaderboards: Any = None,
     ) -> None:
         self.config = config
         self.manager = manager
         self.qq = qq
+        self.leaderboards = leaderboards
         self._log = logger or logging.getLogger("mcqq_bridge.router")
         self._qq_seen = _TTLCache(config.relay.dedupe_ttl_seconds, config.relay.dedupe_max_entries)
         self._mc_seen = _TTLCache(config.relay.dedupe_ttl_seconds, config.relay.dedupe_max_entries)
@@ -168,6 +172,10 @@ class BridgeRouter:
         self._list_pattern = re.compile(
             r"^" + re.escape(config.relay.list_command) + r"(?:\s+(.*))?$",
             re.IGNORECASE | re.DOTALL,
+        )
+        # 排行榜命令：只匹配服务器名，参数不做模糊匹配；/deathx、/playtimes 不匹配
+        self._leaderboard_pattern = re.compile(
+            r"^/(death|playtime)(?:\s+(.*))?$", re.IGNORECASE | re.DOTALL
         )
 
     # -- 回环防护登记 -------------------------------------------------------
@@ -212,6 +220,16 @@ class BridgeRouter:
         command = self._list_pattern.match(command_text)
         if command is not None:
             await self._handle_list(message, (command.group(1) or "").strip())
+            return
+
+        board_command = self._leaderboard_pattern.match(command_text)
+        if board_command is not None:
+            word = board_command.group(1).lower()
+            kind = "deaths" if word == "death" else "playtime"
+            # 只取首个空白 token 作服务器名；多余参数忽略（需求 §6.5）
+            tokens = (board_command.group(2) or "").split()
+            argument = tokens[0] if tokens else ""
+            await self._handle_leaderboard(message, kind, argument)
             return
 
         # 所有以 / 开头的内容一律不转发，不管它是不是已实现的指令
@@ -286,6 +304,47 @@ class BridgeRouter:
             self._log.info("/list 响应过长，已按官方被动回复上限截断")
         for chunk in chunks:
             await self.qq.send_text(chunk, reply_to=message.message_id)
+
+    async def _handle_leaderboard(self, message: QQMessage, kind: str, argument: str) -> None:
+        """``/death``、``/playtime``：只匹配服务器名，无参输出所有启用服全量。
+
+        全部回复都走被动回复（``reply_to=message_id``、``proactive=False``），
+        不消耗主动消息配额；任何失败都只影响本条回复，不影响转发链路。
+        """
+        if self.leaderboards is None:
+            await self.qq.send_text(
+                "排行榜数据暂不可用", reply_to=message.message_id, proactive=False
+            )
+            return
+        try:
+            board = await self.leaderboards.get_board(kind, argument or None)
+        except UnknownServerError:
+            await self.qq.send_text(
+                f"未找到服务器：{_clean(argument, 64)}",
+                reply_to=message.message_id,
+                proactive=False,
+            )
+            return
+        except LeaderboardUnavailable:
+            await self.qq.send_text(
+                "排行榜数据暂不可用", reply_to=message.message_id, proactive=False
+            )
+            return
+        except Exception as exc:  # 统计层异常不得影响 QQ 会话
+            self._log.warning("排行榜查询失败：%s", type(exc).__name__)
+            await self.qq.send_text(
+                "排行榜数据暂不可用", reply_to=message.message_id, proactive=False
+            )
+            return
+
+        chunks = render_leaderboard(
+            board,
+            self.config.bot.max_message_chars,
+            self.config.bot.max_reply_parts,
+            single_server=bool(argument),
+        )
+        for chunk in chunks:
+            await self.qq.send_text(chunk, reply_to=message.message_id, proactive=False)
 
     # -- MC → QQ -----------------------------------------------------------
 

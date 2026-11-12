@@ -39,6 +39,7 @@ def make_config(
     bot: dict[str, Any] | None = None,
     relay: dict[str, Any] | None = None,
     logging: dict[str, Any] | None = None,
+    stats: dict[str, Any] | None = None,
 ) -> AppConfig:
     data = {
         "bot": bot_entry(**(bot or {})),
@@ -47,4 +48,6 @@ def make_config(
         "runtime": {"status_http": {"enabled": False}},
         "logging": logging or {"level": "WARNING"},
     }
+    if stats is not None:
+        data["stats"] = stats
     return AppConfig.model_validate(data)

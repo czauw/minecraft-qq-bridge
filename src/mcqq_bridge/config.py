@@ -1,7 +1,8 @@
 """严格 YAML 配置模型：QQ 官方机器人 + QueQiao 多服务器。
 
 设计要点（对应 docs/MULTISERVER_REQUIREMENTS.md）：
-* 顶层固定 ``bot`` / ``servers`` / ``relay`` / ``runtime`` / ``logging``，未知字段直接拒绝。
+* 顶层固定 ``bot`` / ``servers`` / ``relay`` / ``stats`` / ``runtime`` / ``logging``，
+  未知字段直接拒绝。
 * 每个 server 的 ``name`` 唯一，且（规范化 host, port）组合全局唯一（含禁用项）。
 * 密钥支持 ``${ENV_NAME}`` 严格引用；结构校验（--check-config）不要求密钥存在，
   真正运行前会再校验一次，缺失时给出字段路径并清晰退出。
@@ -28,6 +29,7 @@ __all__ = [
     "RelayConfig",
     "RuntimeConfig",
     "ServerConfig",
+    "StatsConfig",
     "StatusHttpConfig",
     "load_config",
 ]
@@ -76,10 +78,26 @@ class ServerConfig(_Model):
     tls: bool = False
     access_token: str = Field(default="", max_length=512)
     self_name: str = Field(default="", max_length=64)
+    # 排行榜数据源：该服实例目录下的 ``world/stats``。留空 = 该服不采集（排行榜里显示「暂无数据」）。
+    stats_dir: str = Field(default="", max_length=1024)
     players: PlayerQueryConfig = Field(default_factory=PlayerQueryConfig)
     connect_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
     reconnect_initial_seconds: float = Field(default=1.0, gt=0, le=60)
     reconnect_max_seconds: float = Field(default=60.0, ge=1, le=600)
+
+    @field_validator("stats_dir")
+    @classmethod
+    def _stats_dir(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            return ""
+        if "\n" in text or "\r" in text or "\x00" in text:
+            raise ValueError("stats_dir 不能包含换行或 NUL")
+        if not text.startswith("/"):
+            raise ValueError("stats_dir 必须是绝对路径（形如 <实例根>/world/stats）")
+        if text.rstrip("/").rsplit("/", 1)[-1] != "stats":
+            raise ValueError("stats_dir 必须以 stats 结尾（Minecraft 的 <实例根>/world/stats 目录）")
+        return text.rstrip("/") or "/"
 
     @field_validator("name")
     @classmethod
@@ -267,6 +285,25 @@ class StatusHttpConfig(_Model):
             return text.rstrip(".").lower()
 
 
+class StatsConfig(_Model):
+    """排行榜持久化（SQLite）；只放数据库参数，数据源路径在 ``servers[].stats_dir``。"""
+
+    # SQLite 单文件；必须落在 systemd 的 ReadWritePaths=/home/czauw/.local/share/mcqq-bridge 内
+    db_path: str = "/home/czauw/.local/share/mcqq-bridge/stats.db"
+
+    @field_validator("db_path")
+    @classmethod
+    def _db_path(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("stats.db_path 不能为空")
+        if "\n" in text or "\r" in text or "\x00" in text:
+            raise ValueError("stats.db_path 不能包含换行或 NUL")
+        if not text.startswith("/"):
+            raise ValueError("stats.db_path 必须是绝对路径")
+        return text
+
+
 class RuntimeConfig(_Model):
     status_http: StatusHttpConfig = Field(default_factory=StatusHttpConfig)
     shutdown_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
@@ -289,6 +326,7 @@ class AppConfig(_Model):
     bot: BotConfig = Field(default_factory=BotConfig)
     servers: list[ServerConfig] = Field(default_factory=list)
     relay: RelayConfig = Field(default_factory=RelayConfig)
+    stats: StatsConfig = Field(default_factory=StatsConfig)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
 

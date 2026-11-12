@@ -71,6 +71,8 @@ bot:
 #   * name 唯一；host+port 组合全局唯一（禁用项也参与唯一性校验，避免误解封）
 #   * 相同 host 不同 port、不同 host 相同 port 都合法
 #   * enabled=false 的服务器只保留配置：不连接、不监听、不广播、不查询，/list 里完全不出现
+#   * stats_dir 留空 = 该服不采集统计（排行榜里显示「<服务器名> 暂无数据」），
+#     但它仍是启用的服务器，/death、/playtime 与 /list 都会出现
 # -----------------------------------------------------------------------------
 servers:
   # ---- 第 1 台：主服 ----
@@ -82,6 +84,9 @@ servers:
     tls: false                    # QueQiao 未启用 TLS 时为 false
     access_token: ""              # 对应 QueQiao config.yml 的 access_token；可写 ${QUEQIAO_MAIN_TOKEN}
     self_name: ""                 # 握手头 x-self-name；留空则使用上面的 name，必须与 QueQiao server_name 一致
+    # 排行榜数据源：该实例目录下的 world/stats（末级必须是 stats，必须是绝对路径）
+    # 留空 = 不采集；usercache.json 固定从 <stats_dir>/../../usercache.json 读取，不递归搜索
+    stats_dir: ""                 # 例："/opt/mcsmanager/daemon/data/InstanceData/<实例UUID>/world/stats"
     players:
       # 玩家名单查询策略：
       #   auto  = 先 rcon 后 status（推荐；QueQiao 已发布版本没有完整名单 API）
@@ -103,6 +108,7 @@ servers:
     tls: false
     access_token: ""
     self_name: ""
+    stats_dir: ""                 # 留空 = 不采集统计（排行榜显示「生存服 暂无数据」）
     players:
       mode: "auto"
       rcon_command: "list"
@@ -115,11 +121,12 @@ servers:
   - name: "创造服"
     host: "192.168.10.30"
     port: 8080
-    enabled: false                # 禁用：不建连接、不查询，/list 里完全不出现该服务器
+    enabled: false                # 禁用：不建连接、不查询，/list 与排行榜里都完全不出现该服务器
     path: "/"
     tls: false
     access_token: ""
     self_name: ""
+    stats_dir: ""                 # 禁用服务器的 stats_dir 不会被读取
     players:
       mode: "auto"
       rcon_command: "list"
@@ -127,6 +134,19 @@ servers:
     connect_timeout_seconds: 10
     reconnect_initial_seconds: 1
     reconnect_max_seconds: 60
+
+# -----------------------------------------------------------------------------
+# 排行榜（死亡榜 / 在线时长榜）
+# 说明：
+#   * 数据源是各服 servers[].stats_dir（world/stats/*.json），本段只放数据库参数
+#   * 启动时全量导入一次，之后每 60 秒增量扫描（mtime/size/inode 未变则不读文件）
+#   * 在线时长 = stats 累计 tick//20 + 当前会话已过秒数，每 60 秒用 RCON list 对账
+#   * 输出全量（不设 Top N）；文本按服务器/玩家行边界分片，接口返回全量 JSON
+# -----------------------------------------------------------------------------
+stats:
+  # SQLite 单文件绝对路径；目录需已存在且可写（systemd 只放开
+  # /home/czauw/.local/share/mcqq-bridge 这一条 ReadWritePaths）
+  db_path: "/home/czauw/.local/share/mcqq-bridge/stats.db"
 
 # -----------------------------------------------------------------------------
 # 互通行为
