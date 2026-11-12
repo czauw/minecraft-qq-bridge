@@ -24,7 +24,7 @@ QQ 侧只用官方接口（OpenAPI + 官方 WebSocket 网关），不涉及 OneB
 | 死亡事件 | ⚠️ 平台限制 | vanilla / Velocity 不支持 `PlayerDeathEvent` |
 | 全量接收群消息 | ⚠️ 需群主授权 | 未开「接收所有消息」时只能收 @ 事件 |
 | MC 事件主动推送 | ⚠️ 需授权与配额 | 受群主「主动推送消息」开关与平台频控约束 |
-| 真实 QQ 平台 / 真实 MC 全链路 | ❌ 未联调 | 只有本地协议模拟；证据见 `docs/VERIFICATION.md` |
+| 真实 QQ 平台 / 真实 MC 联调 | ⚠️ 部分已验 | 真实 token、网关 `Identify`、`bot_state`、群发送 HTTP 200，四实例 QueQiao 启动 / RCON `list` / `broadcast` ACK 均已实测；群消息双向回显、非零名单、游戏内可见性仍未验证，边界见 §11 与 `docs/VERIFICATION.md` §6 |
 
 ## 2. 环境要求
 
@@ -103,7 +103,9 @@ rcon:
 
 * 握手头 `x-self-name` 由桥接器再做 URL 编码后发送（QueQiao 会 `URLDecoder` 解码），中文服务器名可用；
   名称不一致会被 QueQiao 以 `1008` 拒绝。
-* `access_token` 非空时，桥接器该服的 `access_token` 必须一致（`Authorization: Bearer <token>`）。
+* QueQiao `config.yml` 的 `access_token` 非空时，握手头必须带 `Authorization: Bearer <access_token>`，
+  且桥接器该服的 `access_token` 与之全等；缺失或写错会被 QueQiao 以 `1008 Authorization Header is wrong`
+  直接关闭（该台隔离，不影响其它台）。QueQiao 侧留空则不校验该头。
 * 同机多实例要给每台独立的 WS 端口与 RCON 端口。
 
 ### 4.1 `/list` 的 RCON 要两侧都配
@@ -135,8 +137,10 @@ rcon:
 
 **③ 桥接器**：默认 `players.mode: auto`（先 RCON 后 `get_status` 兜底），无需填 RCON 地址或口令。
 
-只配 QueQiao 没开 MC 的 `enable-rcon`，或两侧口令不一致 → QueQiao 返回失败 → `/list` 显示「离线」。
-这是有意的安全失败，不会假装成功。
+RCON 未开或两侧口令不一致时，QueQiao 执行 `list` 只会返回失败；默认 `players.mode: auto` 下这**不等于**
+`/list` 离线：桥接器会继续用 `get_status`（Server List Ping 采样）兜底，采样条数等于 `online` 人数时照常
+显示名单，**两种来源都失败**才报查询失败 → 显示「离线」。`players.mode: rcon` 才是 RCON 一失败就离线。
+失败时如实显示离线/空名单，不会假装成功（与 §8 一致）。
 
 ## 5. 安装与启动
 
@@ -361,6 +365,9 @@ curl -fsS http://127.0.0.1:18080/api/v1/status
 smoke 会真实建立 WebSocket、校验 `x-self-name` 握手头、走 `send_rcon_command`/`broadcast`/`get_status`
 的请求-响应（含 `echo` 关联），并验证 `/list` 文本、禁用服务器零连接、QQ→MC 广播、MC→QQ 转发。
 **它不连接真实 QQ 与真实 Minecraft**；历史执行计数与逐项证据见 `docs/VERIFICATION.md`。
+本机部署另做过真实联调：真实 token、网关 `Identify`、`bot_state`、群发送 HTTP 200，四台真实 QueQiao 的
+RCON `list` 与 `broadcast` ACK 均有记录；但下面 5 项里的双向回显、非零名单与游戏内可见性仍未验证，
+真实边界见 `docs/VERIFICATION.md` §6。
 
 真实环境验收（需真实机器人、群权限与运行中的 MC），逐项记录成功/失败：
 
@@ -383,7 +390,8 @@ A：所有 `enabled` 都是 `false`，至少启用一台。
 A：`receive_mode: all` 需要群主开「接收所有消息」；没权限就改 `mention`。
 
 **Q：`/list` 显示「离线」，但 QueQiao 日志显示已连接？**
-A：多半是 RCON：MC 没开 `enable-rcon`、`rcon.port` 不一致或口令不同，按 §4.1 两侧核对；
+A：多半是玩家名单两个来源都失败：RCON 没开 `enable-rcon`、`rcon.port` 不一致或口令不同，按 §4.1 两侧核对。
+注意 `mode: auto` 下 RCON 失败本身不会直接导致离线（会退回 ping 采样），采样也不完整才会显示离线；
 临时可设 `players.mode: status`（仅 ping 采样恰好完整时可用）。
 
 **Q：MC 事件没发到 QQ，日志是 `proactive_disabled` 或 `reason=http_...code_...`？**

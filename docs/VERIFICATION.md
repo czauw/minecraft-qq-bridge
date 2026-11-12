@@ -1,8 +1,9 @@
 # 验证报告（QQ 官方机器人 × QueQiao 多服务器）
 
-执行目录：`/home/czauw/minecraft-qq-bridge`。只记录**真实执行过**的结果；没有真实 QQ 凭据与运行中的
-Minecraft/QueQiao，真实平台联调一律标「未验证」。测试 2026-11-11 执行、2026-11-12 复跑确认
-（Python 3.14.9 / `.venv`）；平台资料查阅 2026-11-10，执行前须按管理端复核。历史阶段见 `docs/archive/HISTORY.md`。
+执行目录：`/home/czauw/minecraft-qq-bridge`。只记录**真实执行过**的结果：本机已用真实机器人凭据、真实 QQ
+网关与四台真实 QueQiao 做过局部联调，已验/未验边界单列在 §6，别把「没做完整回路」读成「没连过平台」。
+测试 2026-11-11 执行、2026-11-12 复跑确认（Python 3.14.9 / `.venv`）；平台资料查阅 2026-11-10，执行前须按
+管理端复核。历史阶段见 `docs/archive/HISTORY.md`。
 
 ## 1. 结论速览
 
@@ -12,7 +13,9 @@ Minecraft/QueQiao，真实平台联调一律标「未验证」。测试 2026-11-
 | 协议级集成（真实本地 TCP WebSocket） | ✅ | `tests/test_integration_protocol.py`，3 启用 + 1 禁用 |
 | 端到端 smoke（模拟 QueQiao + 模拟 QQ 网关） | ✅ | `SMOKE PASS: 10/10`（2026-11-12 复跑） |
 | 新入口启动 / 状态接口 / SIGTERM / 日志脱敏 | ✅ | 真实子进程探测（§4） |
-| 真实 QQ 平台、Docker 构建 | ❌ 未验证 / 未执行 | 无 AppID/Secret/群权限；当前用户不在 docker 组 |
+| 真实 QQ 平台（token / 网关 / Identify / `bot_state` / 群发送） | ⚠️ 已连通 | journal：`getAppAccessToken` 200、`GET /gateway` 200、`Identify`、`bot_state` 200、5 次 `POST /v2/groups/.../messages` 200 |
+| 真实群消息双向回显、非零名单、游戏内可见性 | ❌ 未验证 | 真实边界见 §6 第 1、2 条 |
+| Docker 构建 | ❌ 未执行 | 当前用户不在 docker 组 |
 | 真实 Minecraft + QueQiao 全链路 | ⚠️ 仅局部 | 四实例插件启动/RCON/ACK 已实测（`docs/MCSMANAGER_DEPLOY.md`），无真实玩家与双向收发 |
 | 上游「完整玩家名单 API」 | ⚠️ 不存在 | 源码级核实见 §2 |
 
@@ -33,7 +36,7 @@ Minecraft/QueQiao，真实平台联调一律标「未验证」。测试 2026-11-
 
 | 事实 | 来源 |
 |---|---|
-| `x-self-name` 必填、`URLDecoder(UTF-8)` 解码后与 `server_name` 全等比较；`Authorization` 必须等于 `Bearer <token>`；`x-client-origin: minecraft` 被拒 | core 0.6.8 `tool/websocket/WsServer.java` |
+| `x-self-name` 必填、`URLDecoder(UTF-8)` 解码后与 `server_name` 全等比较；`Authorization` 必须等于 `Bearer <token>`（仅当该实例配置了非空 `access_token` 时校验）；`x-client-origin: minecraft` 被拒 | core 0.6.8 `tool/websocket/WsServer.java` |
 | 请求/响应含 `api`/`data`/`echo`，响应 `code`/`status`/`message`/`data` | 官方 `api/v2/` |
 | 事件 `post_type`=`message`/`notice`，`sub_type`=`player_chat`/`player_join`/`player_quit`/`player_death` | 官方 `events/v2/*` |
 | QueQiao `config.yml` 的 `rcon` 只有 `enable`/`port`/`password`，无 host（连本机） | <https://queqiao-docs.pages.dev/config> |
@@ -46,7 +49,7 @@ Minecraft/QueQiao，真实平台联调一律标「未验证」。测试 2026-11-
 
 | 事实 | 来源 |
 |---|---|
-| `POST /app/getAppAccessToken`（`appId`/`clientSecret`）；失败常为 HTTP 200 + 业务 `code`；鉴权头 `Authorization: QQBot <token>` | `dev-prepare/access-token.html` |
+| `POST /app/getAppAccessToken`（`appId`/`clientSecret`）；失败常为 HTTP 200 + 业务 `code`；业务接口鉴权头 `Authorization: QQBot <access_token>`，仅 HTTP 401 时作废缓存 token 并刷新重试一次 | `dev-prepare/access-token.html` |
 | `GET /gateway` → `{url}`；`op=10` Hello、`op=2` Identify、`op=1` 心跳 / `op=11` ACK、`op=6` Resume、`op=7` 重连、`op=9` 会话失效 | `event-emit/websocket.html` |
 | 关闭码：4008/4009 可 Resume；4006/4007/4900~4913 重新 Identify；4001/4002/4010~4014/4914/4915 终止 | 同上错误码表 |
 | 群事件 `GROUP_AT_MESSAGE_CREATE` / `GROUP_MESSAGE_CREATE`，intent `1<<25` | `autogen/event/*` |
@@ -109,12 +112,22 @@ canary in log: False    canary in status: False    group_openid in status: False
 
 ## 6. 未验证与限制
 
-1. **真实 QQ 平台未验证**：token 获取、`/gateway`、真实全量推送、群发送、`msg_seq` 5 次上限、主动配额、
-   `bot_state` 真实取值（含 11253 白名单）都只按文档实现并用本地模拟验证。
-2. **真实 MC 未验证**：非零在线名单的实际输出、各服务端本地化格式、`player_death` 字段差异未实测；
+1. **真实 QQ 平台：已连通，消息回路仍未验证**：真实 `access_token` 获取、真实网关连接与 `Identify`、真实
+   `bot_state` 取值（`allow_proactive_msg=true`、`recv_msg_setting=all`）、向真实群发送（journal 中 5 次
+   `POST /v2/groups/{openid}/messages` 均 HTTP 200）、真实群事件到达并转发到在线 QueQiao
+   （`QQ 消息广播到 2/2 个在线服务器`）均已实测。**仍未验证**：群内普通消息端到端回显（含 `receive_mode: all`
+   下 `<@...>` 前缀的真实到达形态）、`msg_seq` 5 次上限与配额、主动消息在群里的真实呈现。
+2. **真实 MC：插件侧已实测，玩家侧未验证**：四台 QueQiao 启动（`WebSocket Server 在 0.0.0.0:809x`）、
+   RCON `list` 往返（0 人）、`broadcast` ACK、错误/缺失 `Authorization` → 关闭码
+   `1008 Authorization Header is wrong` 均已实测（`docs/MCSMANAGER_DEPLOY.md` §3）。**仍未验证**：非零在线
+   名单的实际输出、游戏内是否真的看到广播/聊天、各服务端本地化格式、`player_death` 字段差异；
    `list` 解析覆盖常见中英文格式，不保证覆盖所有本地化/插件改写。
 3. **loader/版本兼容**：只有上游声明范围，没有 loader 被真实联调；只按 v0.5.0/core 0.6.8 的协议形状实现。
-4. **RCON 前提**：`/list` 需 MC `enable-rcon` 与 QueQiao `rcon.enable` 两侧都配且口令一致，否则显示离线。
+4. **RCON 前提**：`/list` 需 MC `enable-rcon` 与 QueQiao `rcon.enable` 两侧都配且口令一致。默认
+   `players.mode: auto` 下 RCON 失败**不等于**离线：桥接器继续用 `get_status` 采样兜底，仅当采样条数等于
+   `online` 人数才接受；两种来源都失败才抛 `PlayerQueryError` → `/list` 显示离线。`players.mode: rcon`
+   才是 RCON 一失败即离线（`queqiao.py::query_players`，`manager.py::_query_one`；
+   `tests/test_queqiao.py::test_query_auto_falls_back_to_status_when_rcon_missing`）。
 5. **全量接收依赖群权限**：`receive_mode: all` 需群主开「接收所有消息」；`bot_state.recv_msg_setting`
    只能暴露不符，不能改变权限。`bot_state` 仅白名单机器人可用，普通机器人一直 unknown、
    `/readyz` 一直 degraded 属事实暴露，不是故障。

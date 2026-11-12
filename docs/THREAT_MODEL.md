@@ -26,10 +26,12 @@
 
 ## 已实现的控制
 
-* **QQ 侧鉴权**：`client_secret` 换 `access_token`，`Authorization: QQBot <token>`；401 作废并刷新一次，
-  不无限重试。token 与密钥只从 YAML/环境变量读取，日志与状态接口不输出。
-* **QueQiao 侧鉴权**：`Authorization: Bearer <access_token>` + `x-self-name` 全等校验（本端 URL 编码）；
-  认证失败即 `1008`，该台隔离，不影响其它服务器。
+* **QQ 侧鉴权**：`client_secret` 换 `access_token`，业务请求头为 `Authorization: QQBot <access_token>`；
+  只有接口返回 HTTP 401 时才作废本地缓存并刷新 token 重试一次，不无限重试。token 与密钥只从
+  YAML/环境变量读取，日志与状态接口不输出。
+* **QueQiao 侧鉴权**：QueQiao `config.yml` 配了非空 `access_token` 时，握手头须为
+  `Authorization: Bearer <access_token>`，且对端把 `x-self-name` URL 解码后与 `server_name` 全等比较；
+  缺失或错误即 `1008 Authorization Header is wrong`，该台隔离，不影响其它服务器；对端未配置则不校验该头。
 * **群目标精确匹配**：`group_openid` 不等的事件直接丢弃；私聊、频道事件不处理；`author.bot=true` 过滤。
 * **去重**：`(group_openid, message_id)` / `(server, event_id)` 有界 TTL 去重；去重表只在事件**成功入队后**写入，
   队列满的溢出事件保持可重投（不因去重丢失），未处理事件不推进恢复水位。
