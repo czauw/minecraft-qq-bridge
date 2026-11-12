@@ -159,10 +159,28 @@ python -m mcqq_bridge --config config.yaml --env-file .env                 # 前
 
 ### 5.1 本机 systemd 运行方式
 
-本机以 `/etc/systemd/system/mcqq-bridge.service` 运行（不是 Docker）：`User=czauw`，
+本机以 `/etc/systemd/system/mcqq-bridge.service` 运行（不是 Docker）：**`User=root`**（需要读 MCSManager
+实例目录下的 `world/stats`，`/opt/mcsmanager` 是 `750 root:root`，普通用户无法穿透），
 `WorkingDirectory=/home/czauw/minecraft-qq-bridge`，
 `ExecStart=.../.venv/bin/python -m mcqq_bridge --config .../config.yaml --env-file .../.env`（绝对路径），
 `Restart=on-failure`、`RestartSec=10`、`StartLimitBurst=3 / 120s`（密钥缺失时进程退出 2，限次避免刷日志）。
+
+以 root 运行时必须配的加固（缺一条就会出事或过度放权）：
+
+```ini
+ProtectSystem=strict                     # 根文件系统只读
+ProtectHome=read-only
+ReadWritePaths=/home/czauw/.local/share/mcqq-bridge   # 榜单 SQLite 落点（目录必须先存在）
+ReadOnlyPaths=/opt/mcsmanager/daemon/data/InstanceData # 只读挂载实例数据，杜绝误写
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH             # 必须保留：venv 解释器在 700 的 .hermes 下
+NoNewPrivileges=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+```
+
+> 把 `CapabilityBoundingSet` 清空会让 root 连自己的 stdlib 都读不到（实测
+> `Fatal Python error: Failed to import encodings module`，因为 `/home/czauw/.hermes` 是 `700`）。
+> 只保留 `CAP_DAC_READ_SEARCH` 即可：读文件够用，写只在 `ReadWritePaths` 内。
 
 ```bash
 sudo systemctl status mcqq-bridge.service
