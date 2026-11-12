@@ -1,5 +1,6 @@
 # 历史归档：旧 OneBot v11 MVP 的 .env 模板（2026-11-11 移出 .env.example）。
-# 仅用于旧模块 mcqq_bridge.main 的回归测试；新版本请使用 config.yaml + .env.example。
+# 唯一用途：作为 tests/test_hardening.py 的回归夹具（断言旧 Settings 能无异常加载一份合规模板）。
+# 不是用户模板、不随运行生效；新版本请使用 config.yaml + .env.example。
 APP_NAME=minecraft-qq-bridge
 LOG_LEVEL=INFO
 HOST=0.0.0.0
