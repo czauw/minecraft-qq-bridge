@@ -8,7 +8,8 @@
   ticks 变化时把 anchor 推进到该文件的 mtime，避免「文件已含本次会话」再被
   加一次（防双计）；ticks 下降（换世界）按新值重置基线。
 * **60 秒 RCON ``list`` 对账**收敛崩溃/断线残留会话；对账失败绝不批量清空在线记录，
-  而是以「最后确证在线 + 一个对账周期」封顶**把会话关掉并把封顶内的增量折进
+  而是以「该服最后一次成功 ``list`` 的时刻 + 一个对账周期」封顶（成功 ``list`` 之后才 join
+  的会话也不延长该封顶）**把会话关掉并把封顶内的增量折进
   ``player_stats.ticks``**——展示与落盘同一口径，RCON 恢复后不会再补加这段时间。
   对账误差上限即一个对账周期（60 秒），另加最后一次 ``stats`` 落盘前的增量（不可控）。
 * 统计层失败只降级自己：不使桥接器退出、不影响 /list 与消息转发。
@@ -82,6 +83,8 @@ class _ServerState:
     has_history: bool = False
     # 最近一次成功拿到 RCON list 的时刻（epoch 秒）；对账失败时用它算封顶
     last_verified_at: float | None = None
+    # 最近一轮无法确证在线名单（RCON 失败 / 桥接断开）：展示与落盘一起改用严格封顶
+    degraded: bool = False
 
 
 class LeaderboardService:
@@ -237,6 +240,7 @@ class LeaderboardService:
         if connected:
             self._wake.set()
             return
+        self._server_state.setdefault(server, _ServerState()).degraded = True
         self._schedule(self._close_server_sessions(server, self._clock()))
 
     # -- 对外查询 ----------------------------------------------------------
@@ -299,7 +303,7 @@ class LeaderboardService:
                 session = self._sessions.get(key)
                 if session is not None:
                     online_names.add(name)
-                    value += max(0, int(self._session_horizon(session, state, now) - session.started_at))
+                    value += max(0, int(self._session_cap(session, state, now) - session.started_at))
             totals[name] = totals.get(name, 0) + value
 
         ordered = sorted(totals.items(), key=lambda item: (-item[1], item[0]))
@@ -318,7 +322,7 @@ class LeaderboardService:
         return ServerBoard(server=server, rows=rows, total_players=len(rows))
 
     def _session_horizon(self, session: _SessionState, state: _ServerState, now: float) -> float:
-        """在线加时的统一封顶口径（展示与落盘共用）。
+        """**正常在线**会话的加时封顶（服务端最近一轮对账成功时使用）。
 
         「最后确证在线」= max(会话证据时刻, 该服最近一次成功 RCON 名单时刻)；
         封顶 = 它 + 一个对账周期，且不超过当前时刻。
@@ -327,6 +331,26 @@ class LeaderboardService:
         if state.last_verified_at is not None:
             evidence = max(evidence, state.last_verified_at)
         return min(now, evidence + MAX_ONLINE_EXTRAPOLATION_SECONDS)
+
+    def _convergence_cap(self, session: _SessionState, state: _ServerState, now: float) -> float:
+        """**对账失败/无法确证**时的严格封顶（展示与落盘共用）。
+
+        一旦该服 RCON 失败（或桥接断开），最后一次「确证在线」只能是该服最后一次
+        成功拿到 ``list`` 的时刻，**不再用会话证据时刻延长**——否则「成功 list 之后
+        才 join 的会话」会把封顶往后推，突破验收要求的 ``last_verified_at + 60s``。
+        从未成功对账过（``last_verified_at is None``）才退回会话自身的证据时刻，
+        避免启动即失败时把全部会话一律记成 0 秒。
+        """
+        base = state.last_verified_at
+        if base is None:
+            base = session.evidence_at
+        return min(now, base + RECONCILE_INTERVAL_SECONDS)
+
+    def _session_cap(self, session: _SessionState, state: _ServerState, now: float) -> float:
+        """按该服当前是否可确证选择封顶口径（展示与落盘必须同源）。"""
+        if state.degraded:
+            return self._convergence_cap(session, state, now)
+        return self._session_horizon(session, state, now)
 
     # -- 扫描 --------------------------------------------------------------
 
@@ -508,9 +532,11 @@ class LeaderboardService:
     async def _close_server_sessions(self, server: str, now: float, *, reason: str = "连接断开") -> int:
         """关闭该服所有在线会话，并把封顶内的估算增量折进 ``player_stats.ticks``。
 
-        封顶口径与展示完全一致（:meth:`_session_horizon`）：最多算到
-        「最后确证在线 + 一个对账周期」。落盘失败时一轮不动，下一轮重试；
-        会话保持打开，展示端仍按同一封顶截断，不会多算。
+        只在「无法确证在线名单」时调用（RCON 查询失败 / 桥接断开），所以封顶走
+        :meth:`_convergence_cap`：严格以该服 ``last_verified_at + 一个对账周期`` 为界，
+        不被会话证据时刻延长（成功 ``list`` 之后才 join 的会话也不延长）。
+        展示端在 ``degraded`` 时用同一个函数（:meth:`_session_cap`），落盘与显示同口径。
+        落盘失败时本轮整体不动、下一轮重试，会话保持打开。
         """
         state = self._server_state.setdefault(server, _ServerState())
         async with self._lock:
@@ -521,7 +547,7 @@ class LeaderboardService:
             folded: list[tuple[tuple[str, str], int | None]] = []
             for key in keys:
                 session = self._sessions[key]
-                cap = self._session_horizon(session, state, now)
+                cap = self._convergence_cap(session, state, now)
                 extra_seconds = max(0, int(cap - session.started_at))
                 stat = self._stats.get(key)
                 ticks = (stat.ticks if stat else 0) + extra_seconds * 20
@@ -589,12 +615,16 @@ class LeaderboardService:
             if server.name not in self._scanners:
                 continue
             if not self._is_connected(server.name):
+                self._server_state.setdefault(server.name, _ServerState()).degraded = True
                 await self._close_server_sessions(server.name, now, reason="连接断开")
                 continue
             # 查询前先冻结「本代次已存在的会话」：查询期间新开的会话不能被旧快照删掉
             before = {key for key in self._sessions if key[0] == server.name}
             names, reason = await self._online_names(server.name)
             if names is None:
+                # 无法确证名单：严格按 last_verified_at + 一个对账周期封顶收敛
+                state = self._server_state.setdefault(server.name, _ServerState())
+                state.degraded = True
                 closed = await self._close_server_sessions(
                     server.name, self._clock(), reason=f"对账失败（{reason}）"
                 )
@@ -609,6 +639,7 @@ class LeaderboardService:
             # 成功拿到 list 的时刻：失败的下一轮用它做封顶基准
             state = self._server_state.setdefault(server.name, _ServerState())
             state.last_verified_at = self._clock()
+            state.degraded = False
             cache = self._scanners[server.name].usercache()
             online: dict[str, str] = {}
             online_names: list[str] = [str(item) for item in names]

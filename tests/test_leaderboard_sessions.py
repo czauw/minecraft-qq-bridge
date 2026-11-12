@@ -157,6 +157,74 @@ async def test_rcon_failure_caps_persisted_ticks_at_last_verified_plus_60(tmp_pa
         await service.stop()
 
 
+async def test_rcon_failure_after_post_verify_join_caps_at_last_verified_plus_60(tmp_path):
+    """成功 list 之后才 join 的会话，再遇 RCON 失败也必须严格按 last_verified+60s 封顶。
+
+    边界（reviewer 评论#34）：t=0 成功 list，t=30 join 开新会话，t=120 对账失败。
+    封顶只能是 t=0+60=60（不是「证据时刻 30 + 60 = 90」），落盘/展示都不得超过它。
+    """
+    config, manager, client = prepare(tmp_path)  # 首次对账名单为空：不会有会话
+    clock = FakeClock(T0)
+    service = await start_service(config, manager=manager, clock=clock)
+    try:
+        await service.reconcile_once()
+        assert service._server_state["主服"].last_verified_at == T0
+        assert service._sessions == {}
+
+        clock.advance(30)
+        service.offer_event(join_event("主服", "MUEZORE", UUID_MAIN))
+        await service._drain_events()
+        session = service._sessions[("主服", UUID_MAIN)]
+        assert session.started_at == T0 + 30
+
+        clock.advance(90)  # now = T0 + 120，明显晚于 last_verified + 60
+        client.fail = True
+        await service.reconcile_once()
+
+        assert service._sessions == {}
+        board = await service.get_board("playtime")
+        # 权威 100 秒 + 封顶内 30 秒（30→60），而不是证据时刻外推的 60 秒
+        assert board.servers[0].rows[0].value == 130
+        assert board.servers[0].rows[0].online is False
+
+        assert service._store is not None
+        _, stats, sessions = await service._store.load_all()
+        assert sessions == []
+        assert [(row.server, row.ticks) for row in stats] == [("主服", 2600)]
+    finally:
+        await service.stop()
+
+
+async def test_degraded_session_display_and_persist_share_strict_cap(tmp_path):
+    """对账失败后新开的会话：展示同样按 last_verified+60s 封顶，下轮关闭时落盘同值。"""
+    config, manager, client = prepare(tmp_path)
+    clock = FakeClock(T0)
+    service = await start_service(config, manager=manager, clock=clock)
+    try:
+        await service.reconcile_once()  # last_verified = T0
+        client.fail = True
+        clock.advance(120)
+        await service.reconcile_once()  # 失败轮：degraded=True
+        assert service._server_state["主服"].degraded is True
+
+        # 失败期间又来一条 join：会话起点已晚于 last_verified + 60，展示不得再加时
+        service.offer_event(join_event("主服", "MUEZORE", UUID_MAIN))
+        await service._drain_events()
+        clock.advance(600)
+        board = await service.get_board("playtime")
+        assert board.servers[0].rows[0].value == 100  # 权威 100 秒，加时 0
+
+        # 下一轮失败关闭该会话：落盘同样不加时，展示与库同口径
+        await service.reconcile_once()
+        assert service._sessions == {}
+        assert service._store is not None
+        _, stats, _ = await service._store.load_all()
+        assert [(row.server, row.ticks) for row in stats] == [("主服", 2000)]
+        assert (await service.get_board("playtime")).servers[0].rows[0].value == 100
+    finally:
+        await service.stop()
+
+
 async def test_recovered_rcon_does_not_backfill_crashed_time(tmp_path):
     """RCON 恢复后不得把崩溃期间的时间补加到玩家身上。"""
     config, manager, client = prepare(tmp_path, players=["MUEZORE"])
