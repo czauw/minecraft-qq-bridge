@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from .config import AppConfig, ServerConfig
-from .queqiao import MCEventCallback, PlayerQueryError, QueQiaoClient
+from .queqiao import ConnectionCallback, MCEventCallback, PlayerQueryError, QueQiaoClient
 
 __all__ = ["ServerManager", "ServerQueryResult"]
 
@@ -33,11 +33,19 @@ class ServerQueryResult:
 
 
 class ServerManager:
-    def __init__(self, config: AppConfig, on_mc_event: MCEventCallback) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        on_mc_event: MCEventCallback,
+        *,
+        on_connection_change: ConnectionCallback | None = None,
+    ) -> None:
         self.config = config
         self._on_mc_event = on_mc_event
         self._clients: dict[str, QueQiaoClient] = {
-            server.name: QueQiaoClient(server, on_mc_event)
+            server.name: QueQiaoClient(
+                server, on_mc_event, on_connection_change=on_connection_change
+            )
             for server in config.servers
             if server.enabled
         }
@@ -105,7 +113,41 @@ class ServerManager:
         ordered = [results[server.name] for server in selected if server.name in results]
         return ordered
 
-    async def _query_one(self, server: ServerConfig) -> ServerQueryResult:
+    async def query_rcon(self, names: list[str] | None = None) -> list[ServerQueryResult]:
+        """排行榜对账专用：只走 RCON ``list`` 的权威名单（不回落 status、不改配置）。
+
+        与 :meth:`query` 完全隔离：只影响返回结果，不改变 ``/list`` 的查询模式、
+        顺序或状态语义。
+        """
+        selected = [
+            server
+            for server in self.config.servers
+            if server.enabled and (names is None or server.name in names)
+        ]
+        results: dict[str, ServerQueryResult] = {}
+        tasks: dict[str, asyncio.Task[ServerQueryResult]] = {}
+        for server in selected:
+            tasks[server.name] = asyncio.create_task(
+                self._query_one(server, rcon_only=True), name=f"query-rcon-{server.name}"
+            )
+        if tasks:
+            done = await asyncio.gather(*tasks.values(), return_exceptions=True)
+            for name, outcome in zip(tasks.keys(), done):
+                if isinstance(outcome, ServerQueryResult):
+                    results[name] = outcome
+                else:
+                    client = self._clients.get(name)
+                    self._log.warning("%s 排行榜对账查询异常：%s", name, type(outcome).__name__)
+                    results[name] = ServerQueryResult(
+                        name=name,
+                        enabled=True,
+                        connected=bool(client and client.connected),
+                        status="offline",
+                        detail="查询异常",
+                    )
+        return [results[server.name] for server in selected if server.name in results]
+
+    async def _query_one(self, server: ServerConfig, *, rcon_only: bool = False) -> ServerQueryResult:
         client = self._clients.get(server.name)
         if client is None:  # pragma: no cover - 只有启用项才建 client
             return ServerQueryResult(
@@ -116,7 +158,7 @@ class ServerManager:
                 name=server.name, enabled=True, connected=False, status="offline", detail="未连接"
             )
         try:
-            snapshot = await client.query_players()
+            snapshot = await client.query_players(rcon_only=rcon_only)
         except PlayerQueryError as exc:
             self._log.warning("%s 玩家查询失败：%s", server.name, exc)
             return ServerQueryResult(

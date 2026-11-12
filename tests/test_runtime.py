@@ -7,6 +7,7 @@ import pytest
 import yaml
 
 from helpers import make_config, server_entry
+from leaderboard_helpers import make_instance, write_stats
 from mcqq_bridge.config import load_config
 from mcqq_bridge.__main__ import main
 from mcqq_bridge.runtime import BridgeRuntime, create_status_app
@@ -170,3 +171,85 @@ async def test_readyz_exposes_qq_degraded():
     ready = (await get(app, "/readyz")).json()
     assert ready["status"] == "degraded"
     assert ready["qq_degraded"] == ["proactive_state_unknown"]
+
+
+# --- M9：排行榜装配的生命周期与降级隔离 -----------------------------------------
+
+
+async def test_leaderboard_layer_is_inert_without_stats_dir(tmp_path, monkeypatch):
+    """没配置 stats_dir 时不建数据库、不开周期任务，旧启动行为不变。"""
+    config = make_config(servers=[server_entry("主服", 18080)])
+    runtime = BridgeRuntime(config)
+
+    async def noop():
+        return None
+
+    monkeypatch.setattr(runtime.qq, "start", noop)
+    monkeypatch.setattr(runtime.qq, "close", noop)
+    monkeypatch.setattr(runtime.manager, "start", noop)
+    monkeypatch.setattr(runtime.manager, "stop", noop)
+    try:
+        await runtime.start()
+        assert runtime.leaderboards.enabled is False
+        assert runtime.leaderboards._store is None
+        assert not (tmp_path / "stats.db").exists()
+    finally:
+        await runtime.stop()
+
+
+async def test_stats_failure_does_not_change_existing_health_endpoints(tmp_path):
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+    _, stats_dir = make_instance(tmp_path, "a")
+    write_stats(stats_dir, "6f1b0c2e-1111-3a2b-9c4d-000000000001", ticks=20, deaths=1)
+    config = make_config(
+        servers=[server_entry("主服", 18080, stats_dir=str(stats_dir))],
+        stats={"root": str(tmp_path), "db_path": str(blocker / "stats.db")},
+    )
+    runtime = BridgeRuntime(config)
+    started = {"qq": 0, "manager": 0}
+
+    async def count_qq():
+        started["qq"] += 1
+
+    async def count_manager():
+        started["manager"] += 1
+
+    runtime.qq.start = count_qq  # type: ignore[method-assign]
+    runtime.manager.start = count_manager  # type: ignore[method-assign]
+    try:
+        await runtime.start()
+        # 统计层不可用不影响桥接器启动与既有健康接口
+        assert started == {"qq": 1, "manager": 1}
+        app = create_status_app(runtime)
+        assert (await get(app, "/healthz")).json() == {"status": "ok"}
+        assert (await get(app, "/readyz")).status_code == 200
+        assert (await get(app, "/api/v1/leaderboards/deaths")).status_code == 503
+    finally:
+        await runtime.stop()
+
+
+async def test_leaderboard_start_stop_drains_worker_once(tmp_path):
+    _, stats_dir = make_instance(tmp_path, "a")
+    write_stats(stats_dir, "6f1b0c2e-1111-3a2b-9c4d-000000000001", ticks=20, deaths=1)
+    config = make_config(
+        servers=[server_entry("主服", 18080, stats_dir=str(stats_dir))],
+        stats={"root": str(tmp_path), "db_path": str(tmp_path / "stats.db")},
+    )
+    runtime = BridgeRuntime(config)
+
+    async def noop():
+        return None
+
+    runtime.qq.start = noop  # type: ignore[method-assign]
+    runtime.qq.close = noop  # type: ignore[method-assign]
+    runtime.manager.start = noop  # type: ignore[method-assign]
+    runtime.manager.stop = noop  # type: ignore[method-assign]
+    await runtime.start()
+    try:
+        board = await runtime.leaderboards.get_board("deaths")
+        assert board.servers[0].rows[0].value == 1
+    finally:
+        await runtime.stop()
+        await runtime.stop()  # 幂等
+    assert runtime.leaderboards._store_ready is False

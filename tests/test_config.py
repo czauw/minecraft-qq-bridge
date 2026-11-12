@@ -292,3 +292,124 @@ def test_bot_cooldown_bounds_rejected(tmp_path):
     with pytest.raises(ConfigError) as excinfo:
         load_config(write_config(tmp_path, data), require_secrets=False)
     assert "proactive_cooldown" in " ".join(excinfo.value.issues)
+
+
+# --- M9：排行榜配置（stats_dir / stats.db_path）--------------------------------
+
+
+def test_stats_defaults_preserve_existing_config(tmp_path):
+    config = load_config(write_config(tmp_path, BASE))
+    # 旧配置（不含 stats、不含 stats_dir）必须照旧可用，默认不采集
+    assert config.servers[0].stats_dir == ""
+    assert config.stats.db_path == "/home/czauw/.local/share/mcqq-bridge/stats.db"
+    assert config.stats.db_path.startswith("/")
+
+
+def test_stats_dir_accepts_absolute_world_stats_path(tmp_path):
+    data = {
+        **BASE,
+        "servers": [server_entry("主服", 18080, stats_dir="/opt/mcsmanager/x/world/stats/")],
+    }
+    config = load_config(write_config(tmp_path, data))
+    # 末尾斜杠被规范化，便于用 parent.parent 推导 usercache.json
+    assert config.servers[0].stats_dir == "/opt/mcsmanager/x/world/stats"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "world/stats",  # 相对路径
+        "/opt/mcsmanager/x/world/",  # 末级不是 stats
+        "/opt/mcsmanager/x/world/stats\n/evil",  # 内嵌换行
+        "/opt/mcsmanager/x/world/data",
+    ],
+)
+def test_stats_dir_rejects_relative_or_non_stats_paths(tmp_path, bad):
+    data = {**BASE, "servers": [server_entry("主服", 18080, stats_dir=bad)]}
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(write_config(tmp_path, data), require_secrets=False)
+    assert "stats_dir" in " ".join(excinfo.value.issues)
+
+
+def test_stats_db_path_must_be_absolute(tmp_path):
+    data = {**BASE, "stats": {"db_path": "stats.db"}}
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(write_config(tmp_path, data), require_secrets=False)
+    assert "db_path" in " ".join(excinfo.value.issues)
+
+
+def test_stats_root_and_db_path_defaults_are_inside_writable_path(tmp_path):
+    config = load_config(write_config(tmp_path, BASE))
+    # 默认值与 systemd 的 ReadWritePaths 完全一致（需求 §11）
+    assert config.stats.root == "/home/czauw/.local/share/mcqq-bridge"
+    assert config.stats.db_path == "/home/czauw/.local/share/mcqq-bridge/stats.db"
+
+
+@pytest.mark.parametrize(
+    "db_path",
+    [
+        "/etc/qq.db",  # 完全在允许根之外的绝对路径
+        "/home/czauw/.local/share/mcqq-bridge/../../etc/x.db",  # .. 穿越到根外
+        "/home/czauw/.local/share/mcqq-bridge/../instance/world/x.db",  # 穿越到同级实例目录
+    ],
+)
+def test_stats_db_path_outside_root_is_rejected(tmp_path, db_path):
+    data = {**BASE, "stats": {"db_path": db_path}}
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(write_config(tmp_path, data), require_secrets=False)
+    issues = " ".join(excinfo.value.issues)
+    # fail fast 且报清楚字段名
+    assert "stats.db_path" in issues
+
+
+def test_stats_db_path_symlink_escape_is_rejected(tmp_path):
+    root = tmp_path / "allowed"
+    root.mkdir()
+    link = root / "escape"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):  # pragma: no cover - 文件系统不支持软链接
+        pytest.skip("当前文件系统不支持创建符号链接")
+
+    # 软链接本身在 root 内，但真实目标在 root 外 → 必须拒绝
+    data = {**BASE, "stats": {"root": str(root), "db_path": str(link / "stats.db")}}
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(write_config(tmp_path, data), require_secrets=False)
+    assert "stats.db_path" in " ".join(excinfo.value.issues)
+
+
+def test_stats_db_path_inside_root_passes_after_normalization(tmp_path):
+    root = tmp_path / "allowed"
+    (root / "nested").mkdir(parents=True)
+    # root 内的 .. 归一化后仍在 root 内 → 放行（不要求目录已存在）
+    data = {
+        **BASE,
+        "stats": {"root": str(root), "db_path": str(root / "nested" / ".." / "stats.db")},
+    }
+    config = load_config(write_config(tmp_path, data))
+    assert config.stats.db_path == str(root / "nested" / ".." / "stats.db")
+
+
+def test_stats_root_must_not_be_filesystem_root(tmp_path):
+    data = {**BASE, "stats": {"root": "/", "db_path": "/etc/x.db"}}
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(write_config(tmp_path, data), require_secrets=False)
+    assert "stats.root" in " ".join(excinfo.value.issues)
+
+
+def test_stats_path_can_be_missing_at_check_config(tmp_path):
+    from mcqq_bridge.__main__ import main
+
+    data = {
+        **BASE,
+        "servers": [server_entry("主服", 18080, stats_dir="/nonexistent/instance/world/stats")],
+        "stats": {
+            "root": str(tmp_path),
+            "db_path": str(tmp_path / "not-created-yet" / "stats.db"),
+        },
+    }
+    path = write_config(tmp_path, data)
+    # 结构校验不要求目录/数据库已存在
+    assert main(["--config", str(path), "--check-config"]) == 0

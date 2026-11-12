@@ -51,6 +51,8 @@ MAX_EVENT_TASKS = 64
 MAX_PLAYER_LOG = 512
 
 MCEventCallback = Callable[[MCEvent], Awaitable[None]]
+# 连接状态回调：(服务器名, 是否已连接)。用于排行榜在断线/重连后立刻收敛在线会话。
+ConnectionCallback = Callable[[str, bool], None]
 
 logger = logging.getLogger("mcqq_bridge.queqiao")
 
@@ -228,10 +230,13 @@ class QueQiaoClient:
         on_event: MCEventCallback,
         *,
         connect_factory: Callable[..., Any] | None = None,
+        on_connection_change: ConnectionCallback | None = None,
     ) -> None:
         self.server = server
         self._on_event = on_event
         self._connect_factory = connect_factory or ws_connect
+        self._on_connection_change = on_connection_change
+        self._last_notified_connected = False
         self._task: asyncio.Task[None] | None = None
         self._ws: Any = None
         self._send_lock = asyncio.Lock()
@@ -273,6 +278,7 @@ class QueQiaoClient:
         ws = self._ws
         self._ws = None
         self.connected = False
+        self._notify_connection(False)
         if ws is not None:
             try:
                 await ws.close()
@@ -286,6 +292,19 @@ class QueQiaoClient:
         self._fail_pending("客户端已关闭")
         await self._drain_event_tasks()
         self._clear_players("closed")
+
+    def _notify_connection(self, connected: bool) -> None:
+        """连接状态变化通知（幂等 + 异常隔离）：只在状态真正翻转时回调一次。"""
+        if connected == self._last_notified_connected:
+            return
+        self._last_notified_connected = connected
+        callback = self._on_connection_change
+        if callback is None:
+            return
+        try:
+            callback(self.server.name, connected)
+        except Exception:  # 回调失败绝不能影响连接本身
+            self._log.warning("连接状态回调失败（%s）", "connected" if connected else "disconnected")
 
     async def _drain_event_tasks(self) -> None:
         tasks = list(self._event_tasks)
@@ -341,6 +360,7 @@ class QueQiaoClient:
             self.connected = True
             self.last_error = ""
             self._log.info("已连接 QueQiao（%s）", uri)
+            self._notify_connection(True)
             sync_task = asyncio.create_task(self._sync_players(), name=f"sync-{self.server.name}")
             try:
                 async for raw in websocket:
@@ -354,6 +374,7 @@ class QueQiaoClient:
         self._ws = None
         was_connected = self.connected
         self.connected = False
+        self._notify_connection(False)
         # 连接代次 +1：查询在途结果、旧 echo 响应一律作废，防止旧快照/旧响应污染
         self._generation += 1
         self._fail_pending("连接已断开")
@@ -543,13 +564,17 @@ class QueQiaoClient:
         self.last_sync_ok = True
         self._log.info("连接后玩家名单同步完成：%d 人（来源 %s）", len(snapshot.players), snapshot.source)
 
-    async def query_players(self) -> PlayerSnapshot:
+    async def query_players(self, *, rcon_only: bool = False) -> PlayerSnapshot:
         """查询完整在线名单；任何不确定都抛 :class:`PlayerQueryError`。
+
+        ``rcon_only=True`` 供排行榜对账使用：强制走 ``send_rcon_command`` 的字面量
+        ``list``，**不**回退到 ``get_status``，也不改本地 ``players.mode``；其余
+        行为（并发锁、代次校验、增量重放）与默认模式完全一致。
 
         并发保护：同一连接上的查询串行化（``_query_lock``），连接代次变化
         （断线/重连）后旧响应直接作废，避免旧快照覆盖新状态。
         """
-        mode = self.server.players.mode
+        mode = "rcon" if rcon_only else self.server.players.mode
         timeout = self.server.players.timeout_seconds
         errors: list[str] = []
 
@@ -560,7 +585,7 @@ class QueQiaoClient:
 
             if mode in ("auto", "rcon"):
                 try:
-                    snapshot = await self._query_via_rcon(timeout)
+                    snapshot = await self._query_via_rcon(timeout, command="list" if rcon_only else None)
                 except PlayerQueryError as exc:
                     errors.append(f"rcon: {exc}")
                     if mode == "rcon":
@@ -579,9 +604,9 @@ class QueQiaoClient:
 
             return self._apply_snapshot(snapshot, epoch)
 
-    async def _query_via_rcon(self, timeout: float) -> PlayerSnapshot:
+    async def _query_via_rcon(self, timeout: float, command: str | None = None) -> PlayerSnapshot:
         payload = await self._request(
-            "send_rcon_command", {"command": self.server.players.rcon_command}, timeout
+            "send_rcon_command", {"command": command or self.server.players.rcon_command}, timeout
         )
         data = self._check_response(payload, "send_rcon_command")
         if not isinstance(data, str):

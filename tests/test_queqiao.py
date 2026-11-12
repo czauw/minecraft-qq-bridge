@@ -523,3 +523,78 @@ async def test_connect_error_is_controlled():
     message = _connect_error(Boom())
     assert message == "connect_failed:Boom:http_403"
     assert "CANARY" not in message and "user:pass" not in message
+
+
+# --- M9：排行榜用的 rcon_only 查询与连接状态回调 --------------------------------
+
+
+async def test_rcon_only_query_never_falls_back_or_changes_list_mode():
+    """/list 的 status 模式不能被排行榜对账改掉，对账也不能借 status 采样充数。"""
+    client, _ = make_client(players={"mode": "status", "timeout_seconds": 1})
+    calls = stub_request(client, {"get_status": {"code": 200, "status": "SUCCESS", "data": {}}})
+    with pytest.raises(PlayerQueryError):
+        await client.query_players(rcon_only=True)
+    assert calls == ["send_rcon_command"]  # 只打 RCON，不回退 get_status
+    assert client.server.players.mode == "status"  # 本地配置模式不变
+    assert client.player_source == ""  # 没有拿到权威快照
+
+
+async def test_rcon_only_query_sends_literal_list_command():
+    client, _ = make_client(players={"mode": "auto", "rcon_command": "listx", "timeout_seconds": 1})
+    commands: list[str] = []
+
+    async def fake_request(api: str, data: dict, timeout: float) -> dict:
+        commands.append(str(data.get("command")))
+        return {
+            "code": 200,
+            "status": "SUCCESS",
+            "data": "There are 1 of a max of 20 players online: A",
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+    snapshot = await client.query_players(rcon_only=True)
+    assert commands == ["list"]  # 对账固定用字面量 list
+    assert snapshot.players == ["A"]
+
+    # 常规 /list 查询仍然用配置里的命令
+    await client.query_players()
+    assert commands[-1] == "listx"
+
+
+def test_connection_callback_is_idempotent_and_exception_isolated():
+    config = make_config(servers=[server_entry("主服", 18080)])
+    calls: list[tuple[str, bool]] = []
+
+    async def on_event(event: MCEvent) -> None:
+        return None
+
+    client = QueQiaoClient(
+        config.servers[0], on_event, on_connection_change=lambda name, ok: calls.append((name, ok))
+    )
+    client._notify_connection(True)
+    client._notify_connection(True)  # 幂等：只在状态翻转时回调
+    client._notify_connection(False)
+    client._notify_connection(False)
+    assert calls == [("主服", True), ("主服", False)]
+
+    def boom(name: str, ok: bool) -> None:
+        raise RuntimeError("callback failed")
+
+    broken = QueQiaoClient(config.servers[0], on_event, on_connection_change=boom)
+    broken._notify_connection(True)  # 回调异常绝不冒泡到连接逻辑
+
+
+async def test_teardown_notifies_disconnection():
+    config = make_config(servers=[server_entry("主服", 18080)])
+    seen: list[bool] = []
+
+    async def on_event(event: MCEvent) -> None:
+        return None
+
+    client = QueQiaoClient(
+        config.servers[0], on_event, on_connection_change=lambda name, ok: seen.append(ok)
+    )
+    attach_connected(client)
+    client._notify_connection(True)
+    await client._teardown_connection()
+    assert seen == [True, False]
